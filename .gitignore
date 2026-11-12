@@ -2,4 +2,3 @@ backend/.classpath
 backend/.project
 backend/.settings
 backend/target/
-frontend/package-lock.json
