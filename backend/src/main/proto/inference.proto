@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "inference";
+option java_outer_classname = "InferenceProto";
+option objc_class_prefix = "RTG";
+
+package inference;
+
+service InferenceService {
+    rpc Generate(Prompt) returns (stream Response) {}
+}
+
+service AuthenticationService {
+    rpc Sign(Credentials) returns (Result) {}
+}
+
+message Prompt {
+    string prompt = 1;
+    int32 max_tokens = 2;
+    float temperature = 3;
+    bool thinking = 4;
+}
+
+message Credentials {
+    string username = 1;
+    string password = 2;
+}
+
+message Response {
+    oneof payload {
+        Chunk chunk = 1;
+        Done done = 2;
+    }
+}
+
+message Chunk {
+    Kind kind = 1;
+    string text = 2;
+}
+
+message Result {
+    oneof payload {
+        CredentialsResult result = 1;
+        string version = 2;
+    }
+}
+
+enum CredentialsResult {
+    CREDENTIALSRESULT_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    UNSUCCESSFUL = 2;
+}
+
+enum Kind {
+    KIND_UNSPECIFIED = 0;
+    REASONING = 1;
+    ANSWER = 2;
+}
+
+message Done {
+    string finish_reason     = 1;  // "stop" or "length"
+    int32  prompt_tokens     = 2;
+    int32  completion_tokens = 3;
+    double prefill_tps       = 4;  // prompt tokens per second
+    double decode_tps        = 5;  // generated tokens per second
+}
