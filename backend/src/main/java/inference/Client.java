@@ -2,9 +2,9 @@ package inference;
 
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -86,13 +86,6 @@ public class Client {
       return new String(jsonBytes, StandardCharsets.UTF_8).trim();
    }
 
-   public byte[] generateSalt() {
-      SecureRandom random = new SecureRandom();
-      byte[] salt = new byte[16];
-      random.nextBytes(salt);
-      return salt;
-   }
-
    public static void main(String[] args) throws InterruptedException {
       String target = "localhost:8090";
 
@@ -112,6 +105,12 @@ public class Client {
          Auth clientAuth = mapper.readValue(jsonRequest(req.getRequest()), Auth.class);
          logger.info(String.format("Received username: '%s' and password: '%s", clientAuth.username(),
                clientAuth.password()));
+         Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
+               .setPassword(clientAuth.password()).build();
+
+         CredentialsResult result = authStub.login(credentials).getResult();
+         res.sendResponseHeader(result == CredentialsResult.SUCCESS ? 200 : 409);
+         res.sendResponse(Optional.empty());
       });
 
       server.post("/signup", (req, res) -> {
@@ -122,6 +121,8 @@ public class Client {
                .setPassword(clientAuth.password()).build();
 
          CredentialsResult result = authStub.sign(credentials).getResult();
+         res.sendResponseHeader(result == CredentialsResult.SUCCESS ? 200 : 409);
+         res.sendResponse(Optional.empty());
       });
 
       server.start();

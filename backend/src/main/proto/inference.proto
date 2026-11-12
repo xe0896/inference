@@ -13,6 +13,7 @@ service InferenceService {
 
 service AuthenticationService {
     rpc Sign(Credentials) returns (Result) {}
+    rpc Login(Credentials) returns (Result) {}
 }
 
 message Prompt {

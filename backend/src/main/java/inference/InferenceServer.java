@@ -160,11 +160,28 @@ public class InferenceServer {
 
             HttpRequest request = post(DATABASE_URL, cred, "application/json", "/signup", "secret");
             HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
-            System.out.println(response.body());
-            Version version = mapper.readValue(response.body(), Version.class);
-            System.out.println(version);
-            Result res = Result.newBuilder().setVersion(version.version()).build();
-            responseObserver.onNext(res);
+            int code = response.statusCode();
+            CredentialsResult credResult = (code != 200) ? CredentialsResult.UNSUCCESSFUL : CredentialsResult.SUCCESS;
+            Result result = Result.newBuilder().setResult(credResult).build();
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+         } catch (IOException | InterruptedException e) {
+            e.printStackTrace();
+         }
+      }
+
+      @Override
+      public void login(Credentials credentials, StreamObserver<Result> responseObserver) {
+         try (HttpClient client = HttpClient.newHttpClient()) {
+            CredentialsRecord cred = new CredentialsRecord(credentials.getUsername(), credentials.getPassword());
+
+            HttpRequest request = post(DATABASE_URL, cred, "application/json", "/login", "secret");
+            HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
+
+            int code = response.statusCode();
+            CredentialsResult credResult = (code != 200) ? CredentialsResult.UNSUCCESSFUL : CredentialsResult.SUCCESS;
+            Result result = Result.newBuilder().setResult(credResult).build();
+            responseObserver.onNext(result);
             responseObserver.onCompleted();
          } catch (IOException | InterruptedException e) {
             e.printStackTrace();
