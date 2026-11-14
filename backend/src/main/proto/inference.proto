@@ -42,15 +42,9 @@ message Chunk {
 
 message Result {
     oneof payload {
-        CredentialsResult result = 1;
-        string version = 2;
+        int32 status = 1;
+        string uuid = 2;
     }
-}
-
-enum CredentialsResult {
-    CREDENTIALSRESULT_UNSPECIFIED = 0;
-    SUCCESS = 1;
-    UNSUCCESSFUL = 2;
 }
 
 enum Kind {

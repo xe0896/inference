@@ -370,8 +370,10 @@ button.chip.on {
 }
 
 .chip input[type="number"] {
-  width: 44px;
+  /* Width set inline from the value length so there's no trailing gap */
+  min-width: 1ch;
   padding: 0;
+  font-variant-numeric: tabular-nums;
   font: inherit;
   color: var(--text-h);
   background: none;

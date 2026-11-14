@@ -99,12 +99,9 @@
             </configuration>
           </execution>
           <execution>
-            <id>client</id>
+            <id>gateway</id>
             <configuration>
-              <mainClass>inference.Client</mainClass>
-              <arguments>
-                <argument>bob</argument>
-              </arguments>
+              <mainClass>inference.Gateway</mainClass>
             </configuration>
           </execution>
         </executions>

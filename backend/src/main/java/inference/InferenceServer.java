@@ -161,8 +161,13 @@ public class InferenceServer {
             HttpRequest request = post(DATABASE_URL, cred, "application/json", "/signup", "secret");
             HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
             int code = response.statusCode();
-            CredentialsResult credResult = (code != 200) ? CredentialsResult.UNSUCCESSFUL : CredentialsResult.SUCCESS;
-            Result result = Result.newBuilder().setResult(credResult).build();
+            String id = response.body();
+            Result result;
+            if (code == 200) {
+               result = Result.newBuilder().setUuid(id).build();
+            } else {
+               result = Result.newBuilder().setStatus(code).build();
+            }
             responseObserver.onNext(result);
             responseObserver.onCompleted();
          } catch (IOException | InterruptedException e) {
@@ -179,8 +184,13 @@ public class InferenceServer {
             HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
 
             int code = response.statusCode();
-            CredentialsResult credResult = (code != 200) ? CredentialsResult.UNSUCCESSFUL : CredentialsResult.SUCCESS;
-            Result result = Result.newBuilder().setResult(credResult).build();
+            String id = response.body();
+            Result result;
+            if (code == 200) {
+               result = Result.newBuilder().setUuid(id).build();
+            } else {
+               result = Result.newBuilder().setStatus(code).build();
+            }
             responseObserver.onNext(result);
             responseObserver.onCompleted();
          } catch (IOException | InterruptedException e) {
@@ -193,13 +203,13 @@ public class InferenceServer {
       record Message(String role, String content) {
       }
 
-      record ChatTemplateKwargs(boolean enableThinking) {
+      record ChatTemplateKwargs(@JsonProperty("enable_thinking") boolean enableThinking) {
       }
 
       // JsonProperty allowing it to be defined as 'max_tokens' as that is what the
       // API would expect
       record ChatRequest(List<Message> messages, boolean stream, @JsonProperty("max_tokens") int maxTokens,
-            double temperature, ChatTemplateKwargs chatTemplateKwargs) {
+            double temperature, @JsonProperty("chat_template_kwargs") ChatTemplateKwargs chatTemplateKwargs) {
       }
 
       @Override
@@ -244,7 +254,6 @@ public class InferenceServer {
                   if (line.equals("data: [DONE]"))
                      break;
 
-                  System.out.println(line);
                   line = line.substring(6); // Removes 'data: ' prefix
 
                   // A response from llama could either be a piece of content of

@@ -10,11 +10,12 @@ export default function App() {
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
     const [busy, setBusy] = useState(false);
-    const [maxTokens, setMaxTokens] = useState(200);
+    const [maxTokens, setMaxTokens] = useState(2048);
     const [temperature, setTemperature] = useState(0.7);
     const [thinking, setThinking] = useState(true);
     const [user, setUser] = useState(null);
     const [authOpen, setAuthOpen] = useState(false);
+    const [init, setInit] = useState(true);
 
     const abortRef = useRef(null);
     const listRef = useRef(null);
@@ -35,6 +36,10 @@ export default function App() {
         el.style.height = `${el.scrollHeight}px`;
     }, [input]);
 
+    useEffect(() => {
+        setAuthOpen(true);
+    }, []);
+
     function onScroll() {
         const el = listRef.current;
         stickRef.current =
@@ -50,6 +55,10 @@ export default function App() {
     async function send() {
         const prompt = input.trim();
         if (!prompt || busy) return;
+        if (!user) {
+            setAuthOpen(true);
+            return;
+        }
 
         const replyId = nextId++;
         setMessages((prev) => [
@@ -77,6 +86,7 @@ export default function App() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    id: localStorage.getItem("userId"),
                     prompt,
                     max_tokens: maxTokens,
                     temperature,
@@ -161,7 +171,7 @@ export default function App() {
 
     return (
         <div className="chat">
-            <header className="chat-header">
+            <header className="chat-header" inert={authOpen}>
                 <h1>Inference</h1>
                 <div className="header-actions">
                     <button
@@ -198,11 +208,18 @@ export default function App() {
                     onAuthed={(name) => {
                         setUser(name);
                         setAuthOpen(false);
+                        setInit(false);
                     }}
+                    init={init}
                 />
             )}
 
-            <main className="messages" ref={listRef} onScroll={onScroll}>
+            <main
+                className="messages"
+                ref={listRef}
+                onScroll={onScroll}
+                inert={authOpen}
+            >
                 {messages.length === 0 ? (
                     <p className="empty">Send a prompt to get started.</p>
                 ) : (
@@ -227,7 +244,7 @@ export default function App() {
                 )}
             </main>
 
-            <footer className="composer">
+            <footer className="composer" inert={authOpen}>
                 <div
                     className="composer-box"
                     onClick={(e) => {
@@ -262,6 +279,9 @@ export default function App() {
                                     type="number"
                                     min="1"
                                     value={maxTokens}
+                                    style={{
+                                        width: `${String(maxTokens).length}ch`,
+                                    }}
                                     onChange={(e) =>
                                         setMaxTokens(
                                             Number(e.target.value) || 1,
@@ -277,6 +297,9 @@ export default function App() {
                                     max="2"
                                     step="0.1"
                                     value={temperature}
+                                    style={{
+                                        width: `${String(temperature).length}ch`,
+                                    }}
                                     onChange={(e) =>
                                         setTemperature(
                                             Number(e.target.value) || 0,

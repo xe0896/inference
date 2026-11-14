@@ -2,9 +2,16 @@ package inference;
 
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -19,15 +26,20 @@ import io.grpc.InsecureChannelCredentials;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 
-public class Client {
-   private static final Logger logger = Logger.getLogger(Client.class.getName());
+public class Gateway {
+   private static SecureRandom random = new SecureRandom();
+
+   private static final Logger logger = Logger.getLogger(Gateway.class.getName());
    private static final Server server = Server.create(InetAddress.getLoopbackAddress(), 8091);
    private static final ObjectMapper mapper = new ObjectMapper();
    private static InferenceServiceGrpc.InferenceServiceBlockingStub blockingStub;
    private static AuthenticationServiceGrpc.AuthenticationServiceBlockingStub authStub;
+   private static long life = 604800;
 
-   private static final String password = "inference_platform";
-   private static final String url = "jdbc:postgresql://inference.ct8ig6ycgivp.eu-north-1.rds.amazonaws.com:5432/postgres?sslmode=verify-full&sslrootcert=./global-bundle.pem";
+   record Session(String hashedToken, long expiresAt, long createdAt) {
+   }
+
+   private static final Map<UUID, Session> sessions = new HashMap<>();
 
    public static void process(Request req, com.sanim.server.Response res) {
       Prompt request = Prompt.newBuilder().setPrompt(req.prompt())
@@ -76,7 +88,8 @@ public class Client {
       }
    }
 
-   record Request(String prompt, @JsonProperty("max_tokens") int maxTokens, double temperature, boolean thinking) {
+   record Request(String prompt, @JsonProperty("max_tokens") int maxTokens, double temperature, boolean thinking,
+         UUID id) {
    }
 
    record Auth(String username, String password) {
@@ -84,6 +97,38 @@ public class Client {
 
    public static String jsonRequest(byte[] jsonBytes) {
       return new String(jsonBytes, StandardCharsets.UTF_8).trim();
+   }
+
+   public static String newToken() {
+      byte[] bytes = new byte[32];
+      random.nextBytes(bytes);
+      return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+   }
+
+   public static String sha256(String input) {
+      try {
+         // Get an instance of the MessageDigest for SHA-256
+         MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+         // Convert the string to bytes (required for hashing)
+         byte[] encodedHash = digest.digest(
+               input.getBytes(StandardCharsets.UTF_8));
+
+         // Convert the byte array into a hexadecimal string for display
+         StringBuilder hexString = new StringBuilder(2 * encodedHash.length);
+         for (byte b : encodedHash) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) {
+               hexString.append('0');
+            }
+            hexString.append(hex);
+         }
+         return hexString.toString();
+
+      } catch (NoSuchAlgorithmException e) {
+         // This exception should rarely happen in standard Java environments
+         throw new RuntimeException("SHA-256 algorithm not found", e);
+      }
    }
 
    public static void main(String[] args) throws InterruptedException {
@@ -96,9 +141,19 @@ public class Client {
       server.post("/chat", (req, res) -> {
          Request clientRequest = mapper.readValue(jsonRequest(req.getRequest()), Request.class);
 
-         logger.info("Processing prompt: " + clientRequest.prompt());
-         res.startStream();
-         process(clientRequest, res);
+         // session:prefix
+         String token = req.get("cookie").substring(8);
+
+         String hashedToken = sha256(token);
+         Session session = sessions.get(clientRequest.id());
+         if (session.hashedToken().equals(hashedToken)) {
+            logger.info("Processing prompt: " + clientRequest.prompt());
+            res.startStream();
+            process(clientRequest, res);
+         } else {
+            res.sendResponseHeader(404);
+            res.sendResponse(Optional.empty());
+         }
       });
 
       server.post("/login", (req, res) -> {
@@ -108,9 +163,33 @@ public class Client {
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
 
-         CredentialsResult result = authStub.login(credentials).getResult();
-         res.sendResponseHeader(result == CredentialsResult.SUCCESS ? 200 : 409);
-         res.sendResponse(Optional.empty());
+         Result result = authStub.login(credentials);
+         switch (result.getPayloadCase()) {
+            case STATUS -> {
+               // Unsuccessful
+
+               int code = result.getStatus();
+               res.sendResponseHeader(code);
+               res.sendResponse(Optional.empty());
+            }
+
+            case UUID -> {
+               // Successful
+               UUID uuid = UUID.fromString(result.getUuid());
+               String token = newToken();
+               res.addHeader("Set-Cookie",
+                     "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
+               sessions.put(uuid,
+                     new Session(sha256(token), Instant.now().getEpochSecond() + life,
+                           Instant.now().getEpochSecond()));
+               res.sendResponseHeader(200);
+               res.sendResponse(Optional.of(uuid.toString().getBytes()));
+            }
+
+            default -> {
+               System.err.println("Payload not set");
+            }
+         }
       });
 
       server.post("/signup", (req, res) -> {
@@ -120,9 +199,32 @@ public class Client {
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
 
-         CredentialsResult result = authStub.sign(credentials).getResult();
-         res.sendResponseHeader(result == CredentialsResult.SUCCESS ? 200 : 409);
-         res.sendResponse(Optional.empty());
+         Result result = authStub.sign(credentials);
+         switch (result.getPayloadCase()) {
+            case STATUS -> {
+               // Unsuccessful
+               int code = result.getStatus();
+               res.sendResponseHeader(code);
+               res.sendResponse(Optional.empty());
+            }
+
+            case UUID -> {
+               // Successful
+               UUID uuid = UUID.fromString(result.getUuid());
+               String token = newToken();
+               res.addHeader("Set-Cookie",
+                     "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
+               sessions.put(uuid,
+                     new Session(sha256(token), Instant.now().getEpochSecond() + life,
+                           Instant.now().getEpochSecond()));
+               res.sendResponseHeader(200);
+               res.sendResponse(Optional.of(uuid.toString().getBytes()));
+            }
+
+            default -> {
+               System.err.println("Payload not set");
+            }
+         }
       });
 
       server.start();

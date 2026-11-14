@@ -11,17 +11,33 @@ async function submitAuth(mode, username, password) {
     });
 
     if (!response.ok) {
-        let message = `Request failed (${response.status})`;
+        let message;
+        switch (response.status) {
+            case 404:
+                message = "Account not found with that username";
+                break;
+            case 401:
+                message = "Incorrect password";
+                break;
+            case 409:
+                message = "Account already exists with that username";
+                break;
+        }
         try {
             message = (await response.json()).error || message;
         } catch {
             // Non-JSON error body: keep the status message
         }
         throw new Error(message);
+    } else {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const id = new TextDecoder("utf-8").decode(bytes);
+
+        localStorage.setItem("userId", id);
     }
 }
 
-export default function Auth({ onClose, onAuthed }) {
+export default function Auth({ onClose, onAuthed, init }) {
     const [mode, setMode] = useState("login");
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
@@ -29,10 +45,12 @@ export default function Auth({ onClose, onAuthed }) {
     const [error, setError] = useState("");
 
     useEffect(() => {
-        const onKey = (e) => e.key === "Escape" && onClose();
-        window.addEventListener("keydown", onKey);
-        return () => window.removeEventListener("keydown", onKey);
-    }, [onClose]);
+        if (!init) {
+            const onKey = (e) => e.key === "Escape" && onClose();
+            window.addEventListener("keydown", onKey);
+            return () => window.removeEventListener("keydown", onKey);
+        }
+    }, [onClose, init]);
 
     async function onSubmit(e) {
         e.preventDefault();
@@ -54,7 +72,9 @@ export default function Auth({ onClose, onAuthed }) {
     return (
         <div
             className="auth-backdrop"
-            onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+            onMouseDown={(e) =>
+                !init && e.target === e.currentTarget && onClose()
+            }
         >
             <form
                 className="auth"
