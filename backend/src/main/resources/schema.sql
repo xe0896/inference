@@ -1,0 +1,8 @@
+DROP TABLE IF EXISTS users;
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY NOT NULL,
+    username TEXT UNIQUE NOT NULL,
+    salt TEXT NOT NULL,
+    hash TEXT NOT NULL
+);

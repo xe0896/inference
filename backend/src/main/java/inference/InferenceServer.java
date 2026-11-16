@@ -47,158 +47,6 @@ import io.grpc.stub.StreamObserver;
  * Server that manages startup/shutdown of a {@code Greeter} server.
  */
 public class InferenceServer {
-   private static final Logger logger = Logger.getLogger(InferenceServer.class.getName());
-
-   private static final String URL = "http://127.0.0.1:9931";
-
-   private static final String DATABASE_URL = "http://100.115.30.63:8081";
-   // User receiving the stream of reasoning back, almost always required
-   // so we can utilise the gRPC idea of server sending us a stream back
-   private static final boolean STREAM = true;
-   private static final ObjectMapper mapper = new ObjectMapper();
-
-   private Server server;
-
-   private void start() throws IOException {
-      /* The port on which the server should run */
-      int port = 8090;
-      /*
-       * By default gRPC uses a global, shared Executor.newCachedThreadPool() for gRPC
-       * callbacks into
-       * your application. This is convenient, but can cause an excessive number of
-       * threads to be
-       * created if there are many RPCs. It is often better to limit the number of
-       * threads your
-       * application uses for processing and let RPCs queue when the CPU is saturated.
-       * The appropriate number of threads varies heavily between applications.
-       * Async application code generally does not need more threads than CPU cores.
-       */
-      ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-      server = Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
-            .executor(executor)
-            .addService(new InferenceImpl())
-            .addService(new AuthenticationImpl())
-            .build()
-            .start();
-      logger.info("Server started, listening on " + port);
-      Runtime.getRuntime().addShutdownHook(new Thread() {
-         @Override
-         public void run() {
-            // Use stderr here since the logger may have been reset by its JVM shutdown
-            // hook.
-            System.err.println("*** shutting down gRPC server since JVM is shutting down");
-            try {
-               InferenceServer.this.stop();
-            } catch (InterruptedException e) {
-               if (server != null) {
-                  server.shutdownNow();
-               }
-               e.printStackTrace(System.err);
-            } finally {
-               executor.shutdown();
-            }
-            System.err.println("*** server shut down");
-         }
-      });
-   }
-
-   private void stop() throws InterruptedException {
-      if (server != null) {
-         server.shutdown().awaitTermination(30, TimeUnit.SECONDS);
-      }
-   }
-
-   /**
-    * Await termination on the main thread since the grpc library uses daemon
-    * threads.
-    */
-   private void blockUntilShutdown() throws InterruptedException {
-      if (server != null) {
-         server.awaitTermination();
-      }
-   }
-
-   /**
-    * Main launches the server from the command line.
-    */
-   public static void main(String[] args) throws IOException, InterruptedException {
-      final InferenceServer server = new InferenceServer();
-      server.start();
-      server.blockUntilShutdown();
-   }
-
-   public static HttpRequest post(String url, Object obj, String type, String endpoint, String secret)
-         throws JsonProcessingException {
-      String req = mapper.writeValueAsString(obj);
-      System.out.println(prettyPrint(obj));
-      HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url + endpoint))
-            .header("Authorization", "Bearer " + secret)
-            .header("Content-Type", type)
-            .POST(BodyPublishers.ofString(req)).build();
-      return request;
-   }
-
-   public static String prettyPrint(Object obj) throws JsonProcessingException {
-      return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(obj);
-   }
-
-   public static String prettyPrintString(String str) throws JsonProcessingException {
-      return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(mapper.readTree(str));
-   }
-
-   static class AuthenticationImpl extends AuthenticationServiceGrpc.AuthenticationServiceImplBase {
-      record Version(String version) {
-      }
-
-      record CredentialsRecord(String username, String password) {
-      }
-
-      @Override
-      public void sign(Credentials credentials, StreamObserver<Result> responseObserver) {
-         try (HttpClient client = HttpClient.newHttpClient()) {
-            CredentialsRecord cred = new CredentialsRecord(credentials.getUsername(), credentials.getPassword());
-
-            HttpRequest request = post(DATABASE_URL, cred, "application/json", "/signup", "secret");
-            HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
-            int code = response.statusCode();
-            String id = response.body();
-            Result result;
-            if (code == 200) {
-               result = Result.newBuilder().setUuid(id).build();
-            } else {
-               result = Result.newBuilder().setStatus(code).build();
-            }
-            responseObserver.onNext(result);
-            responseObserver.onCompleted();
-         } catch (IOException | InterruptedException e) {
-            e.printStackTrace();
-         }
-      }
-
-      @Override
-      public void login(Credentials credentials, StreamObserver<Result> responseObserver) {
-         try (HttpClient client = HttpClient.newHttpClient()) {
-            CredentialsRecord cred = new CredentialsRecord(credentials.getUsername(), credentials.getPassword());
-
-            HttpRequest request = post(DATABASE_URL, cred, "application/json", "/login", "secret");
-            HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
-
-            int code = response.statusCode();
-            String id = response.body();
-            Result result;
-            if (code == 200) {
-               result = Result.newBuilder().setUuid(id).build();
-            } else {
-               result = Result.newBuilder().setStatus(code).build();
-            }
-            responseObserver.onNext(result);
-            responseObserver.onCompleted();
-         } catch (IOException | InterruptedException e) {
-            e.printStackTrace();
-         }
-      }
-   }
-
    static class InferenceImpl extends InferenceServiceGrpc.InferenceServiceImplBase {
       record Message(String role, String content) {
       }
@@ -212,17 +60,27 @@ public class InferenceServer {
             double temperature, @JsonProperty("chat_template_kwargs") ChatTemplateKwargs chatTemplateKwargs) {
       }
 
+      public static Response processResponse(String text, Kind kind) {
+         Chunk chunk = Chunk.newBuilder().setKind(kind).setText(text).build();
+         Response response = Response.newBuilder().setChunk(chunk).build();
+         return response;
+      }
+
       @Override
-      public void generate(Prompt prompt, StreamObserver<Response> responseObserver) {
+      public void generate(Conversation conv, StreamObserver<Response> responseObserver) {
          try (HttpClient client = HttpClient.newHttpClient()) {
             // Given the prompt from the client which includes some attributes as well
-            String userPrompt = prompt.getPrompt();
-            int maxTokens = prompt.getMaxTokens();
-            double temperature = prompt.getTemperature();
-            boolean thinking = prompt.getThinking();
+            Messages messages = conv.getMessages();
+            int maxTokens = conv.getMaxTokens();
+            double temperature = conv.getTemperature();
+            boolean thinking = conv.getThinking();
+
+            List<Message> proceseedMessages = messages.getMessageList().stream()
+                  .map(m -> new Message(m.getRole(), m.getContent()))
+                  .toList();
 
             // Request in record form which would turn into JSON
-            var chatRequest = new ChatRequest(List.of(new Message("user", userPrompt)), STREAM, maxTokens,
+            var chatRequest = new ChatRequest(proceseedMessages, STREAM, maxTokens,
                   temperature, new ChatTemplateKwargs(thinking));
 
             // An event stream as we want SSE between our server and the llama-server
@@ -278,9 +136,6 @@ public class InferenceServer {
                      int completionTokens = timings.get("predicted_n").asInt();
                      double prefillTps = timings.get("prompt_per_second").asDouble();
                      double decodeTps = timings.get("predicted_per_second").asDouble();
-
-                     System.out.println("Summary has been sent");
-
                      Done done = Done.newBuilder().setFinishReason(reason)
                            .setPromptTokens(promptTokens)
                            .setCompletionTokens(completionTokens)
@@ -296,9 +151,9 @@ public class InferenceServer {
             }
 
             if (Context.current().isCancelled()) {
-               logger.info("Client cancelled: '" + userPrompt + "'");
+               logger.info("Client cancelled: '" + proceseedMessages + "'");
             } else {
-               logger.info("\nGeneration for prompt: '" + userPrompt + "' has been completed");
+               logger.info("\nGeneration for prompt: '" + proceseedMessages + "' has been completed");
             }
 
          } catch (InterruptedException | IOException e) {
@@ -306,10 +161,110 @@ public class InferenceServer {
          }
       }
 
-      public static Response processResponse(String text, Kind kind) {
-         Chunk chunk = Chunk.newBuilder().setKind(kind).setText(text).build();
-         Response response = Response.newBuilder().setChunk(chunk).build();
-         return response;
+      @Override
+      public void summarise(Messages request, StreamObserver<Messages> responseObserver) {
+         try (HttpClient client = HttpClient.newHttpClient()) {
+            List<inference.Message> list = request.getMessageList();
+
+         }
+      }
+   }
+
+   private static final Logger logger = Logger.getLogger(InferenceServer.class.getName());
+   private static final String URL = "http://100.108.55.41:9931";
+
+   // private static final String DATABASE_URL = "http://100.115.30.63:8081";
+   // User receiving the stream of reasoning back, almost always required
+   // so we can utilise the gRPC idea of server sending us a stream back
+   private static final boolean STREAM = true;
+
+   private static final ObjectMapper mapper = new ObjectMapper();
+
+   /**
+    * Main launches the server from the command line.
+    */
+   public static void main(String[] args) throws IOException, InterruptedException {
+      final InferenceServer server = new InferenceServer();
+      server.start();
+      server.blockUntilShutdown();
+   }
+
+   public static HttpRequest post(String url, Object obj, String type, String endpoint, String secret)
+         throws JsonProcessingException {
+      String req = mapper.writeValueAsString(obj);
+      System.out.println(prettyPrint(obj));
+      HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url + endpoint))
+            .header("Authorization", "Bearer " + secret)
+            .header("Content-Type", type)
+            .POST(BodyPublishers.ofString(req)).build();
+      return request;
+   }
+
+   public static String prettyPrint(Object obj) throws JsonProcessingException {
+      return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(obj);
+   }
+
+   public static String prettyPrintString(String str) throws JsonProcessingException {
+      return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(mapper.readTree(str));
+   }
+
+   private Server server;
+
+   /**
+    * Await termination on the main thread since the grpc library uses daemon
+    * threads.
+    */
+   private void blockUntilShutdown() throws InterruptedException {
+      if (server != null) {
+         server.awaitTermination();
+      }
+   }
+
+   private void start() throws IOException {
+      /* The port on which the server should run */
+      int port = 8090;
+      /*
+       * By default gRPC uses a global, shared Executor.newCachedThreadPool() for gRPC
+       * callbacks into
+       * your application. This is convenient, but can cause an excessive number of
+       * threads to be
+       * created if there are many RPCs. It is often better to limit the number of
+       * threads your
+       * application uses for processing and let RPCs queue when the CPU is saturated.
+       * The appropriate number of threads varies heavily between applications.
+       * Async application code generally does not need more threads than CPU cores.
+       */
+      ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+      server = Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
+            .executor(executor)
+            .addService(new InferenceImpl())
+            .build()
+            .start();
+      logger.info("Server started, listening on " + port);
+      Runtime.getRuntime().addShutdownHook(new Thread() {
+         @Override
+         public void run() {
+            // Use stderr here since the logger may have been reset by its JVM shutdown
+            // hook.
+            System.err.println("*** shutting down gRPC server since JVM is shutting down");
+            try {
+               InferenceServer.this.stop();
+            } catch (InterruptedException e) {
+               if (server != null) {
+                  server.shutdownNow();
+               }
+               e.printStackTrace(System.err);
+            } finally {
+               executor.shutdown();
+            }
+            System.err.println("*** server shut down");
+         }
+      });
+   }
+
+   private void stop() throws InterruptedException {
+      if (server != null) {
+         server.shutdown().awaitTermination(30, TimeUnit.SECONDS);
       }
    }
 }

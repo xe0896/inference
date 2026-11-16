@@ -1,6 +1,8 @@
 package inference;
 
+import java.io.IOException;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -9,6 +11,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -30,7 +33,6 @@ public class Gateway {
    private static SecureRandom random = new SecureRandom();
 
    private static final Logger logger = Logger.getLogger(Gateway.class.getName());
-   private static final Server server = Server.create(InetAddress.getLoopbackAddress(), 8091);
    private static final ObjectMapper mapper = new ObjectMapper();
    private static InferenceServiceGrpc.InferenceServiceBlockingStub blockingStub;
    private static AuthenticationServiceGrpc.AuthenticationServiceBlockingStub authStub;
@@ -42,19 +44,27 @@ public class Gateway {
    private static final Map<UUID, Session> sessions = new HashMap<>();
 
    public static void process(Request req, com.sanim.server.Response res) {
-      Prompt request = Prompt.newBuilder().setPrompt(req.prompt())
+      List<inference.Message> protoMessages = req.messages().stream()
+            .map(m -> inference.Message.newBuilder()
+                  .setRole(m.role())
+                  .setContent(m.content())
+                  .build())
+            .toList();
+
+      Conversation conv = Conversation.newBuilder()
+            .setMessages(Messages.newBuilder().addAllMessage(protoMessages).build())
             .setMaxTokens(req.maxTokens())
             .setTemperature((float) req.temperature())
             .setThinking(req.thinking())
             .build();
       Context.CancellableContext ctx = Context.current().withCancellation();
+
       try {
          res.onClose(() -> ctx.cancel(null));
          ctx.call(() -> {
-            Iterator<Response> response = blockingStub.generate(request);
-            boolean answer = false;
+            Iterator<inference.Response> response = blockingStub.generate(conv);
             while (response.hasNext()) {
-               Response next = response.next();
+               inference.Response next = response.next();
                switch (next.getPayloadCase()) {
                   case CHUNK -> {
                      Chunk chunk = next.getChunk();
@@ -88,7 +98,11 @@ public class Gateway {
       }
    }
 
-   record Request(String prompt, @JsonProperty("max_tokens") int maxTokens, double temperature, boolean thinking,
+   record Message(String role, String content) {
+   }
+
+   record Request(List<Message> messages, @JsonProperty("max_tokens") int maxTokens, double temperature,
+         boolean thinking,
          UUID id) {
    }
 
@@ -131,12 +145,46 @@ public class Gateway {
       }
    }
 
-   public static void main(String[] args) throws InterruptedException {
-      String target = "localhost:8090";
+   public static void handleResult(Result result, com.sanim.server.Response res) throws IOException {
+      switch (result.getPayloadCase()) {
+         case STATUS -> {
+            // Unsuccessful
+            int code = result.getStatus();
+            res.sendResponseHeader(code);
+            res.sendResponse(Optional.empty());
+         }
 
-      ManagedChannel channel = Grpc.newChannelBuilder(target, InsecureChannelCredentials.create()).build();
-      blockingStub = InferenceServiceGrpc.newBlockingStub(channel);
-      authStub = AuthenticationServiceGrpc.newBlockingStub(channel);
+         case SUCCESS -> {
+            // Successful login may mean that there is a saved conversation we can get,
+            // meaning the gRPC should return the UUID as well as the list of messages,
+            // so far each user has only one conversation
+            UUID uuid = UUID.fromString(result.getSuccess().getUuid());
+            String token = newToken();
+            res.addHeader("Set-Cookie",
+                  "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
+            sessions.put(uuid,
+                  new Session(sha256(token), Instant.now().getEpochSecond() + life,
+                        Instant.now().getEpochSecond()));
+            res.sendResponseHeader(200);
+            res.sendResponse(Optional.of(uuid.toString().getBytes()));
+         }
+
+         default -> {
+            System.err.println("Payload not set");
+         }
+      }
+   }
+
+   public static void main(String[] args) throws InterruptedException, UnknownHostException {
+      Server server = Server.create(InetAddress.getByName("100.115.30.63"), 8091);
+      String authTarget = "localhost:8081";
+      String modelTarget = "localhost:8090";
+
+      ManagedChannel authChannel = Grpc.newChannelBuilder(authTarget, InsecureChannelCredentials.create()).build();
+      ManagedChannel modelChannel = Grpc.newChannelBuilder(modelTarget, InsecureChannelCredentials.create()).build();
+
+      blockingStub = InferenceServiceGrpc.newBlockingStub(modelChannel);
+      authStub = AuthenticationServiceGrpc.newBlockingStub(authChannel);
 
       server.post("/chat", (req, res) -> {
          Request clientRequest = mapper.readValue(jsonRequest(req.getRequest()), Request.class);
@@ -147,7 +195,7 @@ public class Gateway {
          String hashedToken = sha256(token);
          Session session = sessions.get(clientRequest.id());
          if (session.hashedToken().equals(hashedToken)) {
-            logger.info("Processing prompt: " + clientRequest.prompt());
+            logger.info("Processing prompts: " + clientRequest.messages());
             res.startStream();
             process(clientRequest, res);
          } else {
@@ -162,34 +210,8 @@ public class Gateway {
                clientAuth.password()));
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
-
          Result result = authStub.login(credentials);
-         switch (result.getPayloadCase()) {
-            case STATUS -> {
-               // Unsuccessful
-
-               int code = result.getStatus();
-               res.sendResponseHeader(code);
-               res.sendResponse(Optional.empty());
-            }
-
-            case UUID -> {
-               // Successful
-               UUID uuid = UUID.fromString(result.getUuid());
-               String token = newToken();
-               res.addHeader("Set-Cookie",
-                     "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
-               sessions.put(uuid,
-                     new Session(sha256(token), Instant.now().getEpochSecond() + life,
-                           Instant.now().getEpochSecond()));
-               res.sendResponseHeader(200);
-               res.sendResponse(Optional.of(uuid.toString().getBytes()));
-            }
-
-            default -> {
-               System.err.println("Payload not set");
-            }
-         }
+         handleResult(result, res);
       });
 
       server.post("/signup", (req, res) -> {
@@ -200,35 +222,13 @@ public class Gateway {
                .setPassword(clientAuth.password()).build();
 
          Result result = authStub.sign(credentials);
-         switch (result.getPayloadCase()) {
-            case STATUS -> {
-               // Unsuccessful
-               int code = result.getStatus();
-               res.sendResponseHeader(code);
-               res.sendResponse(Optional.empty());
-            }
-
-            case UUID -> {
-               // Successful
-               UUID uuid = UUID.fromString(result.getUuid());
-               String token = newToken();
-               res.addHeader("Set-Cookie",
-                     "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
-               sessions.put(uuid,
-                     new Session(sha256(token), Instant.now().getEpochSecond() + life,
-                           Instant.now().getEpochSecond()));
-               res.sendResponseHeader(200);
-               res.sendResponse(Optional.of(uuid.toString().getBytes()));
-            }
-
-            default -> {
-               System.err.println("Payload not set");
-            }
-         }
+         handleResult(result, res);
       });
 
       server.start();
 
-      channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+      authChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+      modelChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+
    }
 }

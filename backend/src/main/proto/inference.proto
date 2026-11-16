@@ -8,7 +8,8 @@ option objc_class_prefix = "RTG";
 package inference;
 
 service InferenceService {
-    rpc Generate(Prompt) returns (stream Response) {}
+    rpc Generate(Conversation) returns (stream Response) {}
+    rpc Summarise(Messages) returns (Messages) {}
 }
 
 service AuthenticationService {
@@ -16,8 +17,8 @@ service AuthenticationService {
     rpc Login(Credentials) returns (Result) {}
 }
 
-message Prompt {
-    string prompt = 1;
+message Conversation {
+    Messages messages = 1;
     int32 max_tokens = 2;
     float temperature = 3;
     bool thinking = 4;
@@ -26,6 +27,20 @@ message Prompt {
 message Credentials {
     string username = 1;
     string password = 2;
+}
+
+message Message {
+    string role = 1;
+    string content = 2;
+}
+
+message Messages {
+    repeated Message message = 1;
+}
+
+message LoginSuccess {
+    string uuid = 1;
+    Messages history = 2;
 }
 
 message Response {
@@ -43,7 +58,7 @@ message Chunk {
 message Result {
     oneof payload {
         int32 status = 1;
-        string uuid = 2;
+        LoginSuccess success = 2;
     }
 }
 

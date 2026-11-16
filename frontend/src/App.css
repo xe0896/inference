@@ -546,3 +546,10 @@ button:focus-visible {
     max-width: 88%;
   }
 }
+
+/* KaTeX: let wide display equations scroll instead of overflowing */
+.md .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.25em 0;
+}

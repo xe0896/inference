@@ -1,10 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import Auth from "./Auth.jsx";
 import "./App.css";
 
 let nextId = 0;
+
+// Models often emit \( \) and \[ \] delimiters; remark-math only understands $ / $$.
+// Convert them, leaving fenced and inline code untouched.
+function normalizeMath(text) {
+    return text
+        .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g)
+        .map((part, i) =>
+            i % 2
+                ? part
+                : part
+                      .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
+                      .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m.trim()}$`),
+        )
+        .join("");
+}
 
 export default function App() {
     const [messages, setMessages] = useState([]);
@@ -81,13 +99,21 @@ export default function App() {
         const controller = new AbortController();
         abortRef.current = controller;
 
+        const list = [
+            ...messages.map((m) => ({
+                role: m.role,
+                content: m.text,
+            })),
+            { role: "user", content: prompt },
+        ];
+
         try {
             const response = await fetch("/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     id: localStorage.getItem("userId"),
-                    prompt,
+                    messages: list,
                     max_tokens: maxTokens,
                     temperature,
                     thinking,
@@ -96,7 +122,7 @@ export default function App() {
             });
 
             if (!response.ok) {
-                throw new Error(`Request failed (${response.status})`);
+                throw new Error(`dd (${response.status})`);
             }
 
             const reader = response.body.getReader();
@@ -419,8 +445,11 @@ function AssistantMessage({ m, onToggleReasoning }) {
                 <div className="answer">
                     {m.reasoning && <div className="answer-label">Answer</div>}
                     <div className="md">
-                        <Markdown remarkPlugins={[remarkGfm]}>
-                            {m.text}
+                        <Markdown
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeKatex]}
+                        >
+                            {normalizeMath(m.text)}
                         </Markdown>
                     </div>
                 </div>

@@ -104,6 +104,12 @@
               <mainClass>inference.Gateway</mainClass>
             </configuration>
           </execution>
+          <execution>
+            <id>database</id>
+            <configuration>
+              <mainClass>inference.InferenceDatabase</mainClass>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>

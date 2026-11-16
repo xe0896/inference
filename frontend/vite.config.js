@@ -6,9 +6,9 @@ export default defineConfig({
     plugins: [react()],
     server: {
         proxy: {
-            "/chat": "http://127.0.0.1:8091",
-            "/login": "http://127.0.0.1:8091",
-            "/signup": "http://127.0.0.1:8091",
+            "/chat": "http://100.115.30.63:8091",
+            "/login": "http://100.115.30.63:8091",
+            "/signup": "http://100.115.30.63:8091",
         },
     },
 });
