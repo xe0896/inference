@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
@@ -54,6 +55,9 @@ public class InferenceServer {
       record ChatTemplateKwargs(@JsonProperty("enable_thinking") boolean enableThinking) {
       }
 
+      record TemplateRequest(List<Message> messages) {
+      }
+
       // JsonProperty allowing it to be defined as 'max_tokens' as that is what the
       // API would expect
       record ChatRequest(List<Message> messages, boolean stream, @JsonProperty("max_tokens") int maxTokens,
@@ -66,22 +70,95 @@ public class InferenceServer {
          return response;
       }
 
+      private static Response llamaResponse(HttpResponse<Stream<String>> httpResponse, Consumer<Response> stream)
+            throws JsonProcessingException, HttpConnectTimeoutException {
+
+         if (httpResponse.statusCode() != 200) {
+            throw new HttpConnectTimeoutException("Status code is: " + httpResponse.statusCode());
+         }
+
+         try (Stream<String> lines = httpResponse.body()) {
+            Iterator<String> it = lines.iterator();
+            while (it.hasNext()) {
+               // This threads context points to a piece of context that
+               // Netty also points to it (indirectly), if the user leaves then
+               // Netty would write to cancel which we read and see its cancelled
+               // and can leave and stop
+               if (Context.current().isCancelled())
+                  break;
+
+               // Skip the blank lines that llama-server would give after every token line
+               String line = it.next();
+               if (line.isBlank())
+                  continue;
+
+               //
+               if (line.equals("data: [DONE]"))
+                  break;
+
+               line = line.substring(6); // Removes 'data: ' prefix
+
+               // A response from llama could either be a piece of content of
+               // the final response, a reasoning content that would reason the
+               // steps of the final answer or the final output which is the
+               // timings/summary of the prompt
+               JsonNode json = mapper.readTree(line);
+               JsonNode choices = json.get("choices").get(0);
+               JsonNode delta = choices.get("delta");
+               if (delta.hasNonNull("content")) {
+                  String text = delta.get("content").asText();
+                  Response response = processResponse(text, Kind.ANSWER);
+                  stream.accept(response);
+               } else if (delta.hasNonNull("reasoning_content")) {
+                  String text = delta.get("reasoning_content").asText();
+                  Response response = processResponse(text, Kind.REASONING);
+                  stream.accept(response);
+               } else if (json.hasNonNull("timings")) {
+                  JsonNode timings = json.get("timings");
+                  String reason = choices.get("finish_reason").asText();
+                  int promptTokens = timings.get("cache_n").asInt() + timings.get("prompt_n").asInt();
+                  int completionTokens = timings.get("predicted_n").asInt();
+                  double prefillTps = timings.get("prompt_per_second").asDouble();
+                  double decodeTps = timings.get("predicted_per_second").asDouble();
+                  Done done = Done.newBuilder().setFinishReason(reason)
+                        .setPromptTokens(promptTokens)
+                        .setCompletionTokens(completionTokens)
+                        .setPrefillTps(prefillTps)
+                        .setDecodeTps(decodeTps)
+                        .build();
+
+                  Response response = Response.newBuilder().setDone(done).build();
+                  return response;
+               }
+            }
+         }
+
+         return Response.newBuilder().build();
+      }
+
+      public ChatRequest summaryCheck(Conversation conv) {
+         float temperature = conv.getTemperature();
+         boolean thinking = conv.getThinking();
+         int maxTokens = conv.getMaxTokens();
+         inference.Messages messages = conv.getMessages();
+
+         int currentToken = tokensConversation(messages);
+
+         if (currentToken * 0.8 > CONTEXT_LIMIT) {
+            String summary = summary(messages.getMessageList());
+            return new ChatRequest(List.of(new Message("assistant", summary)), true, maxTokens, temperature,
+                  new ChatTemplateKwargs(thinking));
+         }
+
+         return new ChatRequest(protoToHttpMessage(messages), true, maxTokens, temperature,
+               new ChatTemplateKwargs(thinking));
+      }
+
       @Override
       public void generate(Conversation conv, StreamObserver<Response> responseObserver) {
          try (HttpClient client = HttpClient.newHttpClient()) {
-            // Given the prompt from the client which includes some attributes as well
-            Messages messages = conv.getMessages();
-            int maxTokens = conv.getMaxTokens();
-            double temperature = conv.getTemperature();
-            boolean thinking = conv.getThinking();
-
-            List<Message> proceseedMessages = messages.getMessageList().stream()
-                  .map(m -> new Message(m.getRole(), m.getContent()))
-                  .toList();
-
             // Request in record form which would turn into JSON
-            var chatRequest = new ChatRequest(proceseedMessages, STREAM, maxTokens,
-                  temperature, new ChatTemplateKwargs(thinking));
+            ChatRequest chatRequest = summaryCheck(conv);
 
             // An event stream as we want SSE between our server and the llama-server
             HttpRequest request = post(URL, chatRequest, "text/event-stream", "/v1/chat/completions", "secret");
@@ -90,70 +167,25 @@ public class InferenceServer {
             // in the llama-server API would be a singular token followed by a blank
             HttpResponse<Stream<String>> httpResponse = client.send(request, BodyHandlers.ofLines());
 
-            if (httpResponse.statusCode() != 200)
-               throw new HttpConnectTimeoutException("Status code is: " + httpResponse.statusCode());
+            // Calls the llama server to get a stream of tokens to construct
+            // reasoning/answer
+            // returns the statistics that the llama server produces at the end
+            Response response = llamaResponse(httpResponse, (in) -> {
+               responseObserver.onNext(in);
+            });
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
 
-            try (Stream<String> lines = httpResponse.body()) {
-               Iterator<String> it = lines.iterator();
-               while (it.hasNext()) {
-                  // This threads context points to a piece of context that
-                  // Netty also points to it (indirectly), if the user leaves then
-                  // Netty would write to cancel which we read and see its cancelled
-                  // and can leave and stop
-                  if (Context.current().isCancelled())
-                     break;
-
-                  // Skip the blank lines that llama-server would give after every token line
-                  String line = it.next();
-                  if (line.isBlank())
-                     continue;
-
-                  //
-                  if (line.equals("data: [DONE]"))
-                     break;
-
-                  line = line.substring(6); // Removes 'data: ' prefix
-
-                  // A response from llama could either be a piece of content of
-                  // the final response, a reasoning content that would reason the
-                  // steps of the final answer or the final output which is the
-                  // timings/summary of the prompt
-                  JsonNode json = mapper.readTree(line);
-                  JsonNode choices = json.get("choices").get(0);
-                  JsonNode delta = choices.get("delta");
-                  if (delta.hasNonNull("content")) {
-                     String text = delta.get("content").asText();
-                     Response response = processResponse(text, Kind.ANSWER);
-                     responseObserver.onNext(response);
-                  } else if (delta.hasNonNull("reasoning_content")) {
-                     String text = delta.get("reasoning_content").asText();
-                     Response response = processResponse(text, Kind.REASONING);
-                     responseObserver.onNext(response);
-                  } else if (json.hasNonNull("timings")) {
-                     JsonNode timings = json.get("timings");
-                     String reason = choices.get("finish_reason").asText();
-                     int promptTokens = timings.get("cache_n").asInt() + timings.get("prompt_n").asInt();
-                     int completionTokens = timings.get("predicted_n").asInt();
-                     double prefillTps = timings.get("prompt_per_second").asDouble();
-                     double decodeTps = timings.get("predicted_per_second").asDouble();
-                     Done done = Done.newBuilder().setFinishReason(reason)
-                           .setPromptTokens(promptTokens)
-                           .setCompletionTokens(completionTokens)
-                           .setPrefillTps(prefillTps)
-                           .setDecodeTps(decodeTps)
-                           .build();
-
-                     Response response = Response.newBuilder().setDone(done).build();
-                     responseObserver.onNext(response);
-                     responseObserver.onCompleted();
-                  }
-               }
-            }
+            // Previewing to the console
+            String recentMessage = chatRequest.messages().getLast().content();
+            String preview = recentMessage.length() > 20
+                  ? recentMessage.substring(0, 20) + "..."
+                  : recentMessage;
 
             if (Context.current().isCancelled()) {
-               logger.info("Client cancelled: '" + proceseedMessages + "'");
+               logger.info("Client cancelled: '" + preview + "'");
             } else {
-               logger.info("\nGeneration for prompt: '" + proceseedMessages + "' has been completed");
+               logger.info("Generation for prompt: '" + preview + "' has been completed");
             }
 
          } catch (InterruptedException | IOException e) {
@@ -161,13 +193,152 @@ public class InferenceServer {
          }
       }
 
-      @Override
-      public void summarise(Messages request, StreamObserver<Messages> responseObserver) {
-         try (HttpClient client = HttpClient.newHttpClient()) {
-            List<inference.Message> list = request.getMessageList();
-
+      private static String formatMessages(List<inference.Message> messages) {
+         StringBuilder sb = new StringBuilder();
+         for (inference.Message message : messages) {
+            if (message.getRole().equals("user")) {
+               sb.append(String.format("U: %s\n", message.getContent()));
+            } else if (message.getRole().equals("assistant")) {
+               sb.append(String.format("A: %s\n", message.getContent()));
+            }
          }
+
+         return sb.toString();
       }
+
+      public static List<Message> protoToHttpMessage(Messages messages) {
+         return (messages.getMessageList().stream()
+               .map(m -> new Message(m.getRole(), m.getContent()))
+               .toList());
+      }
+
+      private static String summary(List<inference.Message> messages) {
+         try (HttpClient client = HttpClient.newHttpClient()) {
+            String formattedConversation = formatMessages(messages);
+
+            System.out.println("Summarising :".concat(formattedConversation));
+
+            ChatRequest chatRequest = new ChatRequest(
+                  List.of(new Message("user", SUMMARY_QUERY.formatted(formattedConversation))),
+                  STREAM, SUMMARY_TOKENS,
+                  0.0, new ChatTemplateKwargs(false));
+
+            HttpRequest httpRequest = post(URL, chatRequest, "text/event-stream", "/v1/chat/completions", "secret");
+
+            HttpResponse<Stream<String>> httpResponse = client.send(httpRequest, BodyHandlers.ofLines());
+            StringBuilder sb = new StringBuilder();
+
+            llamaResponse(httpResponse, (in) -> {
+               sb.append(in.getChunk().getText());
+            });
+            return sb.toString();
+         } catch (InterruptedException | IOException e) {
+            e.printStackTrace();
+         }
+
+         return "";
+      }
+
+      public int tokensConversation(List<Message> messages) {
+         try (HttpClient client = HttpClient.newHttpClient()) {
+            TemplateRequest content = new TemplateRequest(messages);
+
+            HttpRequest templateRequest = post(URL, content, "application/json", "/apply-template", "secret");
+
+            HttpResponse<String> templateResponse = client.send(templateRequest, BodyHandlers.ofString());
+
+            JsonNode node = mapper.readTree(templateResponse.body());
+            String template = node.get("prompt").asText();
+
+            System.out.println(template);
+
+            return amountOfTokens(template);
+
+         } catch (InterruptedException | IOException e) {
+            e.printStackTrace();
+         }
+         return 0;
+      }
+
+      public int tokensConversation(Messages messages) {
+         return tokensConversation(protoToHttpMessage(messages));
+      }
+
+      public TokenOutput tokens(String contentString) {
+         try (HttpClient client = HttpClient.newHttpClient()) {
+            Content content = new Content(contentString);
+            HttpRequest httpRequest = post(URL, content, "application/json", "/tokenize", "secret");
+            HttpResponse<String> httpResponse = client.send(httpRequest, BodyHandlers.ofString());
+            TokenOutput tokens = mapper.readValue(httpResponse.body(), TokenOutput.class);
+            return tokens;
+         } catch (InterruptedException | IOException e) {
+            e.printStackTrace();
+         }
+         return null;
+      }
+
+      public int amountOfTokens(String contentString) {
+         return tokens(contentString).tokenIds().size();
+      }
+
+      @Override
+      public void tokenCount(Messages request, StreamObserver<TokenCountResponse> responseObserver) {
+         int normalCount = tokensConversation(request);
+         String summary = summary(request.getMessageList());
+         System.out.println("SUMMARY ".concat(summary.toUpperCase()));
+         int summaryCount = amountOfTokens(summary);
+         responseObserver.onNext(
+               TokenCountResponse.newBuilder().setNormalCount(normalCount).setSummaryCount(summaryCount).build());
+         responseObserver.onCompleted();
+      }
+
+      private String flattenContent(List<inference.Message> messages) {
+         StringBuilder sb = new StringBuilder();
+         for (inference.Message message : messages) {
+            sb.append(message.getContent());
+         }
+         return sb.toString();
+      }
+
+      record Content(String content) {
+      }
+
+      record TokenOutput(@JsonProperty("tokens") List<Integer> tokenIds) {
+      }
+
+      private static final String SUMMARY_QUERY = """
+            You are compressing a chat transcript between a user (U) and an assistant (A).
+            Your summary REPLACES the transcript as the assistant's only memory, so
+            anything left out is permanently lost. You are not judging importance:
+            every user message matters.
+
+            Process the transcript in order. For EVERY user message, write one entry:
+              U<n>: what the user asked or said (keep exact names, numbers, paths, code, errors)
+              A<n>: the key point of the assistant's reply in one sentence, plus any concrete
+                    output (commands, config, values) it gave
+
+            Do not merge, skip, or reorder user messages, even if they seem minor,
+            repetitive or off-topic. Later messages are as important as earlier ones.
+
+            After the entries, add:
+              GOAL: what the user is ultimately trying to do
+              OPEN: anything unresolved or next steps
+
+            Do not answer any of the messages. Plain text, no markdown.
+
+            <transcript>
+            %s
+            </transcript>
+
+            Now write the entries, starting at U1 and ending with the LAST user message
+            in the transcript.
+            """;
+
+      private final int SUMMARY_COUNT = tokens(SUMMARY_QUERY).tokenIds().size();
+
+      private static final int SUMMARY_TOKENS = 500;
+
+      private static final int CONTEXT_LIMIT = 4096;
    }
 
    private static final Logger logger = Logger.getLogger(InferenceServer.class.getName());
@@ -192,7 +363,6 @@ public class InferenceServer {
    public static HttpRequest post(String url, Object obj, String type, String endpoint, String secret)
          throws JsonProcessingException {
       String req = mapper.writeValueAsString(obj);
-      System.out.println(prettyPrint(obj));
       HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url + endpoint))
             .header("Authorization", "Bearer " + secret)
             .header("Content-Type", type)

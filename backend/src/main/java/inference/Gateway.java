@@ -34,7 +34,7 @@ public class Gateway {
 
    private static final Logger logger = Logger.getLogger(Gateway.class.getName());
    private static final ObjectMapper mapper = new ObjectMapper();
-   private static InferenceServiceGrpc.InferenceServiceBlockingStub blockingStub;
+   private static InferenceServiceGrpc.InferenceServiceBlockingStub inferenceStub;
    private static AuthenticationServiceGrpc.AuthenticationServiceBlockingStub authStub;
    private static long life = 604800;
 
@@ -43,16 +43,20 @@ public class Gateway {
 
    private static final Map<UUID, Session> sessions = new HashMap<>();
 
-   public static void process(Request req, com.sanim.server.Response res) {
-      List<inference.Message> protoMessages = req.messages().stream()
+   public static Messages httpMessageToProto(List<Message> messages) {
+      return Messages.newBuilder().addAllMessage(messages.stream()
             .map(m -> inference.Message.newBuilder()
                   .setRole(m.role())
                   .setContent(m.content())
                   .build())
-            .toList();
+            .toList()).build();
+   }
+
+   public static void processModel(Request req, com.sanim.server.Response res) {
+      Messages messages = httpMessageToProto(req.messages());
 
       Conversation conv = Conversation.newBuilder()
-            .setMessages(Messages.newBuilder().addAllMessage(protoMessages).build())
+            .setMessages(messages)
             .setMaxTokens(req.maxTokens())
             .setTemperature((float) req.temperature())
             .setThinking(req.thinking())
@@ -62,7 +66,7 @@ public class Gateway {
       try {
          res.onClose(() -> ctx.cancel(null));
          ctx.call(() -> {
-            Iterator<inference.Response> response = blockingStub.generate(conv);
+            Iterator<inference.Response> response = inferenceStub.generate(conv);
             while (response.hasNext()) {
                inference.Response next = response.next();
                switch (next.getPayloadCase()) {
@@ -81,7 +85,6 @@ public class Gateway {
                                  "prefill_tps", done.getPrefillTps(),
                                  "decode_tps", done.getDecodeTps())));
                   }
-
                   case PAYLOAD_NOT_SET -> {
                      System.err.println("Payload not set");
                   }
@@ -104,6 +107,9 @@ public class Gateway {
    record Request(List<Message> messages, @JsonProperty("max_tokens") int maxTokens, double temperature,
          boolean thinking,
          UUID id) {
+   }
+
+   record Convo(List<Message> messages, UUID id) {
    }
 
    record Auth(String username, String password) {
@@ -178,12 +184,13 @@ public class Gateway {
    public static void main(String[] args) throws InterruptedException, UnknownHostException {
       Server server = Server.create(InetAddress.getByName("100.115.30.63"), 8091);
       String authTarget = "localhost:8081";
-      String modelTarget = "localhost:8090";
+      String inferenceTarget = "localhost:8090";
 
       ManagedChannel authChannel = Grpc.newChannelBuilder(authTarget, InsecureChannelCredentials.create()).build();
-      ManagedChannel modelChannel = Grpc.newChannelBuilder(modelTarget, InsecureChannelCredentials.create()).build();
+      ManagedChannel inferenceChannel = Grpc.newChannelBuilder(inferenceTarget, InsecureChannelCredentials.create())
+            .build();
 
-      blockingStub = InferenceServiceGrpc.newBlockingStub(modelChannel);
+      inferenceStub = InferenceServiceGrpc.newBlockingStub(inferenceChannel);
       authStub = AuthenticationServiceGrpc.newBlockingStub(authChannel);
 
       server.post("/chat", (req, res) -> {
@@ -195,9 +202,31 @@ public class Gateway {
          String hashedToken = sha256(token);
          Session session = sessions.get(clientRequest.id());
          if (session.hashedToken().equals(hashedToken)) {
-            logger.info("Processing prompts: " + clientRequest.messages());
             res.startStream();
-            process(clientRequest, res);
+
+            processModel(clientRequest, res);
+         } else {
+            res.sendResponseHeader(404);
+            res.sendResponse(Optional.empty());
+         }
+      });
+
+      server.post("/tokens", (req, res) -> {
+         Convo convo = mapper.readValue(jsonRequest(req.getRequest()), Convo.class);
+         String token = req.get("cookie").substring(8);
+
+         String hashedToken = sha256(token);
+         Session session = sessions.get(convo.id());
+         if (session.hashedToken().equals(hashedToken)) {
+            Messages messages = httpMessageToProto(convo.messages());
+            TokenCountResponse countResponse = inferenceStub.tokenCount(messages);
+            res.sendResponseHeader(200);
+
+            Map<String, Object> body = Map.of(
+                  "normal", countResponse.getNormalCount(),
+                  "summary", countResponse.getSummaryCount());
+
+            res.sendResponse(Optional.of(mapper.writeValueAsBytes(body)));
          } else {
             res.sendResponseHeader(404);
             res.sendResponse(Optional.empty());
@@ -206,8 +235,6 @@ public class Gateway {
 
       server.post("/login", (req, res) -> {
          Auth clientAuth = mapper.readValue(jsonRequest(req.getRequest()), Auth.class);
-         logger.info(String.format("Received username: '%s' and password: '%s", clientAuth.username(),
-               clientAuth.password()));
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
          Result result = authStub.login(credentials);
@@ -216,8 +243,6 @@ public class Gateway {
 
       server.post("/signup", (req, res) -> {
          Auth clientAuth = mapper.readValue(jsonRequest(req.getRequest()), Auth.class);
-         logger.info(String.format("Received username: '%s' and password: '%s", clientAuth.username(),
-               clientAuth.password()));
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
 
@@ -228,7 +253,6 @@ public class Gateway {
       server.start();
 
       authChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-      modelChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-
+      inferenceChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
    }
 }

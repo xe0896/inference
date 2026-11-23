@@ -171,7 +171,6 @@ public class InferenceDatabase {
          } catch (SQLException e) {
             System.err.println("Database error: " + e.getMessage());
          }
-
       }
    }
 

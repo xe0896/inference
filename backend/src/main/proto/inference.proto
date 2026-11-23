@@ -9,7 +9,7 @@ package inference;
 
 service InferenceService {
     rpc Generate(Conversation) returns (stream Response) {}
-    rpc Summarise(Messages) returns (Messages) {}
+    rpc TokenCount(Messages) returns (TokenCountResponse) {}
 }
 
 service AuthenticationService {
@@ -22,6 +22,11 @@ message Conversation {
     int32 max_tokens = 2;
     float temperature = 3;
     bool thinking = 4;
+}
+
+message TokenCountResponse {
+    int32 normal_count = 1;
+    int32 summary_count = 2;
 }
 
 message Credentials {

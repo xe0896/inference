@@ -18,8 +18,14 @@ function normalizeMath(text) {
             i % 2
                 ? part
                 : part
-                      .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
-                      .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m.trim()}$`),
+                      .replace(
+                          /\\\[([\s\S]+?)\\\]/g,
+                          (_, m) => `\n$$\n${m.trim()}\n$$\n`,
+                      )
+                      .replace(
+                          /\\\(([\s\S]+?)\\\)/g,
+                          (_, m) => `$${m.trim()}$`,
+                      ),
         )
         .join("");
 }
@@ -129,6 +135,7 @@ export default function App() {
             const decoder = new TextDecoder();
 
             let buffer = "";
+            let answer = "";
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -150,6 +157,7 @@ export default function App() {
                             thinkStart: m.thinkStart ?? Date.now(),
                         }));
                     } else if (event === "answer") {
+                        answer += data.text;
                         patch(replyId, (m) => ({
                             text: m.text + data.text,
                             thinkEnd:
@@ -165,6 +173,27 @@ export default function App() {
                     }
                 }
             }
+
+            const tokenResponse = await fetch("/tokens", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    id: localStorage.getItem("userId"),
+                    messages: [...list, { role: "assistant", content: answer }],
+                }),
+                signal: controller.signal,
+            });
+
+            if (!tokenResponse.ok) {
+                throw new Error(`dd (${tokenResponse.status})`);
+            }
+
+            // { normal, summary } token counts, appended after the stats
+            const { normal, summary } = await tokenResponse.json();
+            const tokens = `tokens: normal ${normal}, summary ${summary}`;
+            patch(replyId, (m) => ({
+                done: m.done ? `${m.done}\n${tokens}` : tokens,
+            }));
         } catch (err) {
             if (err.name === "AbortError") {
                 patch(replyId, () => ({ stopped: true }));
