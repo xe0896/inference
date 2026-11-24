@@ -24,6 +24,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +52,8 @@ import io.grpc.stub.StreamObserver;
  */
 public class InferenceServer {
    static class InferenceImpl extends InferenceServiceGrpc.InferenceServiceImplBase {
+      private static final String MODEL_ID = "ggml-org/gemma-4-E2B-it-GGUF:Q80";
+
       record Message(String role, String content) {
       }
 
@@ -60,7 +65,8 @@ public class InferenceServer {
 
       // JsonProperty allowing it to be defined as 'max_tokens' as that is what the
       // API would expect
-      record ChatRequest(List<Message> messages, boolean stream, @JsonProperty("max_tokens") int maxTokens,
+      record ChatRequest(String model, List<Message> messages, boolean stream,
+            @JsonProperty("max_tokens") int maxTokens,
             double temperature, @JsonProperty("chat_template_kwargs") ChatTemplateKwargs chatTemplateKwargs) {
       }
 
@@ -149,19 +155,19 @@ public class InferenceServer {
             responseObserver
                   .onNext(Response.newBuilder().setChunk(Chunk.newBuilder().setKind(Kind.COMPACT).setText("")).build());
             List<inference.Message> m = messages.getMessageList();
-            String summary = summary(m.subList(0, m.size() - 1));
+            String summary = codexSummary(m.subList(0, m.size() - 1));
             responseObserver
                   .onNext(Response.newBuilder()
                         .setChunk(Chunk.newBuilder().setKind(Kind.FINISHED_COMPACT).setText(summary))
                         .build());
 
-            return new ChatRequest(
+            return new ChatRequest(MODEL_ID,
                   List.of(new Message("assistant", summary), new Message("user", m.getLast().getContent())), true,
                   maxTokens, temperature,
                   new ChatTemplateKwargs(thinking));
          }
 
-         return new ChatRequest(protoToHttpMessage(messages), true, maxTokens, temperature,
+         return new ChatRequest(MODEL_ID, protoToHttpMessage(messages), true, maxTokens, temperature,
                new ChatTemplateKwargs(thinking));
       }
 
@@ -224,11 +230,45 @@ public class InferenceServer {
                .toList());
       }
 
-      private static String summary(List<inference.Message> messages) {
+      private static String codexSummary(List<inference.Message> messages) {
+         String formattedConversation = formatMessages(messages);
+         try {
+            Path emptyDir = Files.createTempDirectory("codex-");
+
+            Process process = new ProcessBuilder(
+                  "/home/ubuntu/.local/bin/codex", "exec",
+                  "--ephemeral",
+                  "--skip-git-repo-check",
+                  "--ignore-user-config",
+                  "-s", "read-only",
+                  "-C", emptyDir.toString(),
+                  "-c", "model_reasoning_effort=\"low\"",
+                  "-").redirectError(ProcessBuilder.Redirect.INHERIT)
+                  .start();
+
+            try (var stdin = process.getOutputStream()) {
+               stdin.write(SUMMARY_QUERY.formatted(formattedConversation).getBytes(StandardCharsets.UTF_8));
+            }
+
+            String output = new String(
+                  process.getInputStream().readAllBytes(),
+                  StandardCharsets.UTF_8);
+
+            process.waitFor();
+
+            return output;
+         } catch (IOException | InterruptedException e) {
+            e.printStackTrace();
+         }
+
+         return "";
+      }
+
+      private static String llamaSummary(List<inference.Message> messages) {
          try (HttpClient client = HttpClient.newHttpClient()) {
             String formattedConversation = formatMessages(messages);
 
-            ChatRequest chatRequest = new ChatRequest(
+            ChatRequest chatRequest = new ChatRequest(MODEL_ID,
                   List.of(new Message("user", SUMMARY_QUERY.formatted(formattedConversation))),
                   STREAM, SUMMARY_TOKENS,
                   0.0, new ChatTemplateKwargs(false));
@@ -258,7 +298,6 @@ public class InferenceServer {
             HttpResponse<String> templateResponse = client.send(templateRequest, BodyHandlers.ofString());
 
             JsonNode node = mapper.readTree(templateResponse.body());
-            System.out.println(node);
             String template = node.get("prompt").asText();
 
             return amountOfTokens(template);
@@ -293,7 +332,7 @@ public class InferenceServer {
       @Override
       public void tokenCount(Messages request, StreamObserver<TokenCountResponse> responseObserver) {
          int normalCount = tokensConversation(request);
-         String summary = summary(request.getMessageList());
+         String summary = codexSummary(request.getMessageList());
          System.out.println("SUMMARY ".concat(summary.toUpperCase()));
          int summaryCount = amountOfTokens(summary);
          responseObserver.onNext(
@@ -308,31 +347,37 @@ public class InferenceServer {
       }
 
       private static final String SUMMARY_QUERY = """
-            You are compressing a chat transcript between a user (U) and an assistant (A).
-            Your summary REPLACES the transcript as the assistant's only memory, so
-            anything left out is permanently lost. You are not judging importance:
-            every user message matters.
+            Compress the following conversation into a detailed memory that will replace the original transcript.
 
-            Process the transcript in order. For EVERY user message, write one entry:
-              U<n>: what the user asked or said (keep exact names, numbers, paths, code, errors)
-              A<n>: the key point of the assistant's reply in one sentence, plus any concrete
-                    output (commands, config, values) it gave
+            Preserve information rather than prioritising brevity.
 
-            Do not merge, skip, or reorder user messages, even if they seem minor,
-            repetitive or off-topic. Later messages are as important as earlier ones.
+            For each user message and corresponding assistant response:
+            - Preserve the user's complete intent, questions and clarifications.
+            - Preserve all distinct facts, explanations and technical details.
+            - Keep exact names, numbers, commands, paths, errors and configuration values.
+            - Keep relevant code and examples.
+            - Preserve decisions, corrections, rejected approaches and their reasons.
+            - Preserve context needed to understand follow-up questions.
+            - Remove filler, greetings and redundant wording only.
 
-            After the entries, add:
-              GOAL: what the user is ultimately trying to do
-              OPEN: anything unresolved or next steps
+            Process messages chronologically. Do not skip or merge messages.
+            Give earlier and later messages equal attention.
+            Use as many sentences as necessary to preserve information.
+            Do not invent information.
 
-            Do not answer any of the messages. Plain text, no markdown.
+            Format:
+            U1: ...
+            A1: ...
+            U2: ...
+            A2: ...
+
+            Continue until the end of the transcript.
+
+            Output only the compressed conversation in plain text.
 
             <transcript>
             %s
             </transcript>
-
-            Now write the entries, starting at U1 and ending with the LAST user message
-            in the transcript.
             """;
 
       private final int SUMMARY_COUNT = tokens(SUMMARY_QUERY).tokenIds().size();

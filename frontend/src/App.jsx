@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -30,11 +30,31 @@ function normalizeMath(text) {
         .join("");
 }
 
+// Messages sent as context. Everything is still rendered, but once the backend
+// has summarised a turn, the summary stands in for all messages before the
+// prompt that triggered it. That prompt is kept so the list goes
+// summary -> user -> assistant (llama-server rejects consecutive assistants).
+function buildContext(messages) {
+    let start = 0;
+    let base = [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].summary) {
+            start = i - 1;
+            base = [{ role: "assistant", content: messages[i].summary }];
+            break;
+        }
+    }
+    return [
+        ...base,
+        ...messages.slice(start).map((m) => ({ role: m.role, content: m.text })),
+    ];
+}
+
 export default function App() {
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
     const [busy, setBusy] = useState(false);
-    const [maxTokens, setMaxTokens] = useState(2048);
+    const [maxTokens, setMaxTokens] = useState(8192);
     const [temperature, setTemperature] = useState(0.7);
     const [thinking, setThinking] = useState(true);
     const [user, setUser] = useState(null);
@@ -105,13 +125,7 @@ export default function App() {
         const controller = new AbortController();
         abortRef.current = controller;
 
-        const list = [
-            ...messages.map((m) => ({
-                role: m.role,
-                content: m.text,
-            })),
-            { role: "user", content: prompt },
-        ];
+        const list = [...buildContext(messages), { role: "user", content: prompt }];
 
         try {
             const response = await fetch("/chat", {
@@ -136,6 +150,7 @@ export default function App() {
 
             let buffer = "";
             let answer = "";
+            let compactSummary = null;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -149,9 +164,23 @@ export default function App() {
 
                     const [eventLine, dataLine] = raw.split("\n");
                     const event = eventLine.slice("event: ".length);
+                    // compact is a bare flag: no data to parse
+                    if (event === "compact") {
+                        patch(replyId, () => ({ compacting: true }));
+                        continue;
+                    }
+
                     const data = JSON.parse(dataLine.slice("data: ".length));
 
-                    if (event === "reasoning") {
+                    if (event === "finished_compact") {
+                        // Carries the summary; this reply becomes the new
+                        // context base for later requests
+                        compactSummary = data.text;
+                        patch(replyId, () => ({
+                            compacting: false,
+                            summary: compactSummary,
+                        }));
+                    } else if (event === "reasoning") {
                         patch(replyId, (m) => ({
                             reasoning: m.reasoning + data.text,
                             thinkStart: m.thinkStart ?? Date.now(),
@@ -179,7 +208,15 @@ export default function App() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     id: localStorage.getItem("userId"),
-                    messages: [...list, { role: "assistant", content: answer }],
+                    // After compaction, count the context the next request
+                    // will actually send (same shape as buildContext)
+                    messages: compactSummary
+                        ? [
+                              { role: "assistant", content: compactSummary },
+                              { role: "user", content: prompt },
+                              { role: "assistant", content: answer },
+                          ]
+                        : [...list, { role: "assistant", content: answer }],
                 }),
                 signal: controller.signal,
             });
@@ -203,6 +240,7 @@ export default function App() {
         } finally {
             patch(replyId, (m) => ({
                 pending: false,
+                compacting: false,
                 thinkEnd: m.thinkStart && !m.thinkEnd ? Date.now() : m.thinkEnd,
             }));
             abortRef.current = null;
@@ -284,16 +322,23 @@ export default function App() {
                                 <div className="bubble">{m.text}</div>
                             </div>
                         ) : (
-                            <div key={m.id} className="row assistant">
-                                <AssistantMessage
-                                    m={m}
-                                    onToggleReasoning={(open) =>
-                                        patch(m.id, () => ({
-                                            reasoningOpen: open,
-                                        }))
-                                    }
-                                />
-                            </div>
+                            <Fragment key={m.id}>
+                                {m.summary && (
+                                    <div className="summary-divider">
+                                        Earlier messages summarised
+                                    </div>
+                                )}
+                                <div className="row assistant">
+                                    <AssistantMessage
+                                        m={m}
+                                        onToggleReasoning={(open) =>
+                                            patch(m.id, () => ({
+                                                reasoningOpen: open,
+                                            }))
+                                        }
+                                    />
+                                </div>
+                            </Fragment>
                         ),
                     )
                 )}
@@ -462,7 +507,14 @@ function AssistantMessage({ m, onToggleReasoning }) {
                 </div>
             )}
 
-            {m.pending && !m.text && !m.reasoning && (
+            {m.compacting && (
+                <div className="compacting" role="status">
+                    <span className="spinner" aria-hidden="true" />
+                    <span>Compacting conversation</span>
+                </div>
+            )}
+
+            {m.pending && !m.compacting && !m.text && !m.reasoning && (
                 <span className="dots" aria-label="Generating">
                     <i />
                     <i />

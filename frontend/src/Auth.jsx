@@ -24,6 +24,7 @@ async function submitAuth(mode, username, password) {
                 break;
         }
         try {
+            ``;
             message = (await response.json()).error || message;
         } catch {
             // Non-JSON error body: keep the status message
