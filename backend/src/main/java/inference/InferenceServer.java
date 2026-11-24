@@ -136,17 +136,28 @@ public class InferenceServer {
          return Response.newBuilder().build();
       }
 
-      public ChatRequest summaryCheck(Conversation conv) {
+      public ChatRequest summaryCheck(Conversation conv, StreamObserver<Response> responseObserver) {
          float temperature = conv.getTemperature();
          boolean thinking = conv.getThinking();
          int maxTokens = conv.getMaxTokens();
          inference.Messages messages = conv.getMessages();
 
          int currentToken = tokensConversation(messages);
+         System.out.println("Current token count: " + currentToken);
 
-         if (currentToken * 0.8 > CONTEXT_LIMIT) {
-            String summary = summary(messages.getMessageList());
-            return new ChatRequest(List.of(new Message("assistant", summary)), true, maxTokens, temperature,
+         if (currentToken > CONTEXT_LIMIT * 0.1) {
+            responseObserver
+                  .onNext(Response.newBuilder().setChunk(Chunk.newBuilder().setKind(Kind.COMPACT).setText("")).build());
+            List<inference.Message> m = messages.getMessageList();
+            String summary = summary(m.subList(0, m.size() - 1));
+            responseObserver
+                  .onNext(Response.newBuilder()
+                        .setChunk(Chunk.newBuilder().setKind(Kind.FINISHED_COMPACT).setText(summary))
+                        .build());
+
+            return new ChatRequest(
+                  List.of(new Message("assistant", summary), new Message("user", m.getLast().getContent())), true,
+                  maxTokens, temperature,
                   new ChatTemplateKwargs(thinking));
          }
 
@@ -158,7 +169,7 @@ public class InferenceServer {
       public void generate(Conversation conv, StreamObserver<Response> responseObserver) {
          try (HttpClient client = HttpClient.newHttpClient()) {
             // Request in record form which would turn into JSON
-            ChatRequest chatRequest = summaryCheck(conv);
+            ChatRequest chatRequest = summaryCheck(conv, responseObserver);
 
             // An event stream as we want SSE between our server and the llama-server
             HttpRequest request = post(URL, chatRequest, "text/event-stream", "/v1/chat/completions", "secret");
@@ -173,6 +184,7 @@ public class InferenceServer {
             Response response = llamaResponse(httpResponse, (in) -> {
                responseObserver.onNext(in);
             });
+
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
@@ -216,8 +228,6 @@ public class InferenceServer {
          try (HttpClient client = HttpClient.newHttpClient()) {
             String formattedConversation = formatMessages(messages);
 
-            System.out.println("Summarising :".concat(formattedConversation));
-
             ChatRequest chatRequest = new ChatRequest(
                   List.of(new Message("user", SUMMARY_QUERY.formatted(formattedConversation))),
                   STREAM, SUMMARY_TOKENS,
@@ -248,9 +258,8 @@ public class InferenceServer {
             HttpResponse<String> templateResponse = client.send(templateRequest, BodyHandlers.ofString());
 
             JsonNode node = mapper.readTree(templateResponse.body());
+            System.out.println(node);
             String template = node.get("prompt").asText();
-
-            System.out.println(template);
 
             return amountOfTokens(template);
 
@@ -290,14 +299,6 @@ public class InferenceServer {
          responseObserver.onNext(
                TokenCountResponse.newBuilder().setNormalCount(normalCount).setSummaryCount(summaryCount).build());
          responseObserver.onCompleted();
-      }
-
-      private String flattenContent(List<inference.Message> messages) {
-         StringBuilder sb = new StringBuilder();
-         for (inference.Message message : messages) {
-            sb.append(message.getContent());
-         }
-         return sb.toString();
       }
 
       record Content(String content) {

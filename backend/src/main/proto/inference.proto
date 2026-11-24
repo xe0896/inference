@@ -71,6 +71,8 @@ enum Kind {
     KIND_UNSPECIFIED = 0;
     REASONING = 1;
     ANSWER = 2;
+    COMPACT = 3;
+    FINISHED_COMPACT = 4;
 }
 
 message Done {

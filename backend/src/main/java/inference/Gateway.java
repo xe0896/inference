@@ -72,7 +72,16 @@ public class Gateway {
                switch (next.getPayloadCase()) {
                   case CHUNK -> {
                      Chunk chunk = next.getChunk();
-                     String event = (chunk.getKind() == Kind.REASONING) ? "reasoning" : "answer";
+                     String event;
+                     if (chunk.getKind() == Kind.REASONING) {
+                        event = "reasoning";
+                     } else if (chunk.getKind() == Kind.ANSWER) {
+                        event = "answer";
+                     } else if (chunk.getKind() == Kind.COMPACT) {
+                        event = "compact";
+                     } else {
+                        event = "finished_compact";
+                     }
                      res.sendEvent(event, mapper.writeValueAsString(Map.of("text", chunk.getText())));
                   }
 
@@ -88,6 +97,7 @@ public class Gateway {
                   case PAYLOAD_NOT_SET -> {
                      System.err.println("Payload not set");
                   }
+
                }
             }
             return null;
