@@ -1,13 +1,20 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import Auth from "./Auth.jsx";
+import Usage, {
+    ContextRing,
+    DEFAULT_CONTEXT_LIMIT,
+    fetchUsage,
+} from "./Usage.jsx";
 import "./App.css";
 
 let nextId = 0;
+
+const emptySession = { prompt: 0, completion: 0, requests: 0, compactions: 0 };
 
 // Models often emit \( \) and \[ \] delimiters; remark-math only understands $ / $$.
 // Convert them, leaving fenced and inline code untouched.
@@ -46,7 +53,9 @@ function buildContext(messages) {
     }
     return [
         ...base,
-        ...messages.slice(start).map((m) => ({ role: m.role, content: m.text })),
+        ...messages
+            .slice(start)
+            .map((m) => ({ role: m.role, content: m.text })),
     ];
 }
 
@@ -60,6 +69,35 @@ export default function App() {
     const [user, setUser] = useState(null);
     const [authOpen, setAuthOpen] = useState(false);
     const [init, setInit] = useState(true);
+    const [usageOpen, setUsageOpen] = useState(false);
+    // Running totals for this page session, built from `done` events
+    const [session, setSession] = useState(emptySession);
+    // Size of the context the next request will send, from /tokens
+    const [context, setContext] = useState(0);
+    // All-time figures and context limit from /usage
+    const [usage, setUsage] = useState(null);
+    const [usageError, setUsageError] = useState("");
+    const modalOpen = authOpen || usageOpen;
+    const closeUsage = useCallback(() => setUsageOpen(false), []);
+    const contextLimit = usage?.context_length || DEFAULT_CONTEXT_LIMIT;
+
+    const refreshUsage = useCallback(() => {
+        fetchUsage()
+            .then((u) => {
+                setUsage(u);
+                setUsageError("");
+            })
+            .catch((err) => setUsageError(err.message));
+    }, []);
+
+    // Load on login and whenever the dialog opens
+    useEffect(() => {
+        if (user) refreshUsage();
+    }, [user, refreshUsage]);
+
+    useEffect(() => {
+        if (usageOpen) refreshUsage();
+    }, [usageOpen, refreshUsage]);
 
     const abortRef = useRef(null);
     const listRef = useRef(null);
@@ -125,7 +163,10 @@ export default function App() {
         const controller = new AbortController();
         abortRef.current = controller;
 
-        const list = [...buildContext(messages), { role: "user", content: prompt }];
+        const list = [
+            ...buildContext(messages),
+            { role: "user", content: prompt },
+        ];
 
         try {
             const response = await fetch("/chat", {
@@ -176,6 +217,10 @@ export default function App() {
                         // Carries the summary; this reply becomes the new
                         // context base for later requests
                         compactSummary = data.text;
+                        setSession((s) => ({
+                            ...s,
+                            compactions: s.compactions + 1,
+                        }));
                         patch(replyId, () => ({
                             compacting: false,
                             summary: compactSummary,
@@ -198,6 +243,13 @@ export default function App() {
                         // Raw payload, shown as-is under the message
                         patch(replyId, () => ({
                             done: dataLine.slice("data: ".length),
+                        }));
+                        setSession((s) => ({
+                            ...s,
+                            prompt: s.prompt + (data.prompt_tokens ?? 0),
+                            completion:
+                                s.completion + (data.completion_tokens ?? 0),
+                            requests: s.requests + 1,
                         }));
                     }
                 }
@@ -227,6 +279,7 @@ export default function App() {
 
             // { normal, summary } token counts, appended after the stats
             const { normal, summary } = await tokenResponse.json();
+            setContext(normal);
             const tokens = `tokens: normal ${normal}, summary ${summary}`;
             patch(replyId, (m) => ({
                 done: m.done ? `${m.done}\n${tokens}` : tokens,
@@ -245,6 +298,7 @@ export default function App() {
             }));
             abortRef.current = null;
             setBusy(false);
+            refreshUsage();
             inputRef.current?.focus();
         }
     }
@@ -259,12 +313,20 @@ export default function App() {
     function clear() {
         abortRef.current?.abort();
         setMessages([]);
+        setContext(0);
         inputRef.current?.focus();
+    }
+
+    function logOut() {
+        setUser(null);
+        setSession(emptySession);
+        setContext(0);
+        setUsage(null);
     }
 
     return (
         <div className="chat">
-            <header className="chat-header" inert={authOpen}>
+            <header className="chat-header" inert={modalOpen}>
                 <h1>Inference</h1>
                 <div className="header-actions">
                     <button
@@ -276,11 +338,14 @@ export default function App() {
                     </button>
                     {user ? (
                         <>
-                            <span className="user">{user}</span>
                             <button
                                 className="ghost"
-                                onClick={() => setUser(null)}
+                                onClick={() => setUsageOpen(true)}
                             >
+                                Usage
+                            </button>
+                            <span className="user">{user}</span>
+                            <button className="ghost" onClick={logOut}>
                                 Log out
                             </button>
                         </>
@@ -294,6 +359,17 @@ export default function App() {
                     )}
                 </div>
             </header>
+
+            {usageOpen && (
+                <Usage
+                    session={session}
+                    context={context}
+                    limit={contextLimit}
+                    usage={usage}
+                    error={usageError}
+                    onClose={closeUsage}
+                />
+            )}
 
             {authOpen && (
                 <Auth
@@ -311,7 +387,7 @@ export default function App() {
                 className="messages"
                 ref={listRef}
                 onScroll={onScroll}
-                inert={authOpen}
+                inert={modalOpen}
             >
                 {messages.length === 0 ? (
                     <p className="empty">Send a prompt to get started.</p>
@@ -344,7 +420,7 @@ export default function App() {
                 )}
             </main>
 
-            <footer className="composer" inert={authOpen}>
+            <footer className="composer" inert={modalOpen}>
                 <div
                     className="composer-box"
                     onClick={(e) => {
@@ -409,50 +485,59 @@ export default function App() {
                             </label>
                         </div>
 
-                        {busy ? (
-                            <button
-                                className="send"
-                                onClick={() => abortRef.current?.abort()}
-                                aria-label="Stop"
-                            >
-                                <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 12 12"
-                                    aria-hidden="true"
+                        <div className="composer-actions">
+                            {user && (
+                                <ContextRing
+                                    context={context}
+                                    limit={contextLimit}
+                                    onClick={() => setUsageOpen(true)}
+                                />
+                            )}
+                            {busy ? (
+                                <button
+                                    className="send"
+                                    onClick={() => abortRef.current?.abort()}
+                                    aria-label="Stop"
                                 >
-                                    <rect
+                                    <svg
                                         width="12"
                                         height="12"
-                                        rx="2"
-                                        fill="currentColor"
-                                    />
-                                </svg>
-                            </button>
-                        ) : (
-                            <button
-                                className="send"
-                                onClick={send}
-                                disabled={!input.trim()}
-                                aria-label="Send"
-                            >
-                                <svg
-                                    width="16"
-                                    height="16"
-                                    viewBox="0 0 16 16"
-                                    aria-hidden="true"
+                                        viewBox="0 0 12 12"
+                                        aria-hidden="true"
+                                    >
+                                        <rect
+                                            width="12"
+                                            height="12"
+                                            rx="2"
+                                            fill="currentColor"
+                                        />
+                                    </svg>
+                                </button>
+                            ) : (
+                                <button
+                                    className="send"
+                                    onClick={send}
+                                    disabled={!input.trim()}
+                                    aria-label="Send"
                                 >
-                                    <path
-                                        d="M8 13V3M3.5 7.5 8 3l4.5 4.5"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            </button>
-                        )}
+                                    <svg
+                                        width="16"
+                                        height="16"
+                                        viewBox="0 0 16 16"
+                                        aria-hidden="true"
+                                    >
+                                        <path
+                                            d="M8 13V3M3.5 7.5 8 3l4.5 4.5"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                </button>
+                            )}
+                        </div>
                     </div>
                 </div>
             </footer>

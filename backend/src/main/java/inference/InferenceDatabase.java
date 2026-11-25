@@ -95,42 +95,88 @@ public class InferenceDatabase {
       }
    }
 
+   static class StatImpl extends StatServiceGrpc.StatServiceImplBase {
+      static String statQuery = "SELECT * FROM statistics WHERE id = ?";
+
+      @Override
+      public void getStats(inference.UUID uuid, StreamObserver<StatsResult> responseObserver) {
+         try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
+            PreparedStatement statPs = conn.prepareStatement(statQuery);
+            statPs.setObject(1, UUID.fromString(uuid.getUuid()));
+            ResultSet rs = statPs.executeQuery();
+            if (rs.next()) {
+               // exists
+               int promptTokens = rs.getInt("prompt_tokens");
+               int completionTokens = rs.getInt("completion_tokens");
+               int requests = rs.getInt("requests");
+               int compaction = rs.getInt("compaction");
+               int contextLength = rs.getInt("context_length");
+
+               StatsSuccess success = StatsSuccess.newBuilder()
+                     .setCompaction(compaction)
+                     .setCompletionTokens(completionTokens)
+                     .setContextLength(contextLength)
+                     .setPromptTokens(promptTokens)
+                     .setRequests(requests)
+                     .build();
+
+               StatsResult result = StatsResult.newBuilder().setSuccess(success).build();
+               responseObserver.onNext(result);
+            } else {
+               // does not exist
+               StatsResult result = StatsResult.newBuilder().setStatus(NOT_FOUND).build();
+               responseObserver.onNext(result);
+            }
+            responseObserver.onCompleted();
+         } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+            throw new RuntimeException(e);
+         }
+      }
+   }
+
    static class AuthenticationImpl extends AuthenticationServiceGrpc.AuthenticationServiceImplBase {
       static String existenceQuery = "SELECT COUNT(*) FROM users WHERE username = ?";
       static String insertUserQuery = "INSERT INTO users (id, username, salt, hash) VALUES (?, ?, ?, ?)";
+      static String insertStatQuery = "INSERT INTO statistics (id) VALUES (?)";
       static String getUserTuple = "SELECT * FROM users WHERE username = ?";
 
       @Override
-      public void sign(Credentials credentials, StreamObserver<Result> responseObserver) {
+      public void sign(Credentials credentials, StreamObserver<LoginResult> responseObserver) {
          String username = credentials.getUsername();
          String password = credentials.getPassword();
          try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
             PreparedStatement existencePs = conn.prepareStatement(existenceQuery);
             existencePs.setString(1, username);
 
-            try (ResultSet rs = existencePs.executeQuery()) {
-               rs.next(); // Sits before the row so make it go ahead by one
+            ResultSet rs = existencePs.executeQuery();
+            rs.next(); // Sits before the row so make it go ahead by one
 
-               if (rs.getInt(1) > 0) {
-                  // Already exists so send 409 conflict
-                  Result result = Result.newBuilder().setStatus(CONFLICT).build();
-                  responseObserver.onNext(result);
-               } else {
-                  // New user
-                  PreparedStatement insertUserPs = conn.prepareStatement(insertUserQuery);
-                  String salt = Base64.getEncoder().encodeToString(generateSalt());
-                  UUID id = UUID.randomUUID();
-                  insertUserPs.setObject(1, id);
-                  insertUserPs.setString(2, username);
-                  insertUserPs.setString(3, salt);
-                  insertUserPs.setString(4, sha256(password.concat(salt)));
-                  insertUserPs.executeUpdate();
-                  LoginSuccess success = LoginSuccess.newBuilder().setUuid(id.toString()).build();
-                  Result result = Result.newBuilder().setSuccess(success).build();
-                  responseObserver.onNext(result);
-               }
-               responseObserver.onCompleted();
+            if (rs.getInt(1) > 0) {
+               // Already exists so send 409 conflict
+               LoginResult result = LoginResult.newBuilder().setStatus(CONFLICT).build();
+               responseObserver.onNext(result);
+            } else {
+               // New user
+               PreparedStatement insertUserPs = conn.prepareStatement(insertUserQuery);
+               String salt = Base64.getEncoder().encodeToString(generateSalt());
+               UUID id = UUID.randomUUID();
+               insertUserPs.setObject(1, id);
+               insertUserPs.setString(2, username);
+               insertUserPs.setString(3, salt);
+               insertUserPs.setString(4, sha256(password.concat(salt)));
+               insertUserPs.executeUpdate();
+               LoginSuccess success = LoginSuccess.newBuilder()
+                     .setUuid(inference.UUID.newBuilder().setUuid(id.toString()).build()).build();
+               LoginResult result = LoginResult.newBuilder().setSuccess(success).build();
+               PreparedStatement statPs = conn.prepareStatement(insertStatQuery);
+               statPs.setObject(1, id);
+               statPs.executeUpdate();
+               responseObserver.onNext(result);
             }
+
+            responseObserver.onCompleted();
+
          } catch (SQLException e) {
             System.err.println("Database error: " + e.getMessage());
             throw new RuntimeException(e);
@@ -138,7 +184,7 @@ public class InferenceDatabase {
       }
 
       @Override
-      public void login(Credentials credentials, StreamObserver<Result> responseObserver) {
+      public void login(Credentials credentials, StreamObserver<LoginResult> responseObserver) {
          String username = credentials.getUsername();
          String password = credentials.getPassword();
 
@@ -154,17 +200,18 @@ public class InferenceDatabase {
                String currentHash = sha256(password.concat(salt));
 
                if (hash.equals(currentHash)) {
-                  LoginSuccess success = LoginSuccess.newBuilder().setUuid(id.toString()).build();
-                  Result result = Result.newBuilder().setSuccess(success).build();
+                  LoginSuccess success = LoginSuccess.newBuilder()
+                        .setUuid(inference.UUID.newBuilder().setUuid(id.toString()).build()).build();
+                  LoginResult result = LoginResult.newBuilder().setSuccess(success).build();
                   responseObserver.onNext(result);
                   responseObserver.onCompleted();
                } else {
-                  Result result = Result.newBuilder().setStatus(UNAUTHORISED).build();
+                  LoginResult result = LoginResult.newBuilder().setStatus(UNAUTHORISED).build();
                   responseObserver.onNext(result);
                   responseObserver.onCompleted();
                }
             } else {
-               Result result = Result.newBuilder().setStatus(NOT_FOUND).build();
+               LoginResult result = LoginResult.newBuilder().setStatus(NOT_FOUND).build();
                responseObserver.onNext(result);
                responseObserver.onCompleted();
             }
@@ -180,6 +227,7 @@ public class InferenceDatabase {
       server = Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
             .executor(executor)
             .addService(new AuthenticationImpl())
+            .addService(new StatImpl())
             .build()
             .start();
 

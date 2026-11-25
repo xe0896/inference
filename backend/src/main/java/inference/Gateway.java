@@ -20,6 +20,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sanim.server.Server;
 
@@ -35,7 +36,9 @@ public class Gateway {
    private static final Logger logger = Logger.getLogger(Gateway.class.getName());
    private static final ObjectMapper mapper = new ObjectMapper();
    private static InferenceServiceGrpc.InferenceServiceBlockingStub inferenceStub;
-   private static AuthenticationServiceGrpc.AuthenticationServiceBlockingStub authStub;
+   private static AuthenticationServiceGrpc.AuthenticationServiceBlockingStub verifyStub;
+   private static StatServiceGrpc.StatServiceBlockingStub statStub;
+
    private static long life = 604800;
 
    record Session(String hashedToken, long expiresAt, long createdAt) {
@@ -161,7 +164,7 @@ public class Gateway {
       }
    }
 
-   public static void handleResult(Result result, com.sanim.server.Response res) throws IOException {
+   public static void handleResult(LoginResult result, com.sanim.server.Response res) throws IOException {
       switch (result.getPayloadCase()) {
          case STATUS -> {
             // Unsuccessful
@@ -174,7 +177,7 @@ public class Gateway {
             // Successful login may mean that there is a saved conversation we can get,
             // meaning the gRPC should return the UUID as well as the list of messages,
             // so far each user has only one conversation
-            UUID uuid = UUID.fromString(result.getSuccess().getUuid());
+            UUID uuid = UUID.fromString(result.getSuccess().getUuid().getUuid());
             String token = newToken();
             res.addHeader("Set-Cookie",
                   "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=" + life);
@@ -193,15 +196,17 @@ public class Gateway {
 
    public static void main(String[] args) throws InterruptedException, UnknownHostException {
       Server server = Server.create(InetAddress.getByName("100.115.30.63"), 8091);
-      String authTarget = "localhost:8081";
+      String databaseTarget = "localhost:8081";
       String inferenceTarget = "localhost:8090";
 
-      ManagedChannel authChannel = Grpc.newChannelBuilder(authTarget, InsecureChannelCredentials.create()).build();
+      ManagedChannel databaseChannel = Grpc.newChannelBuilder(databaseTarget, InsecureChannelCredentials.create())
+            .build();
       ManagedChannel inferenceChannel = Grpc.newChannelBuilder(inferenceTarget, InsecureChannelCredentials.create())
             .build();
 
       inferenceStub = InferenceServiceGrpc.newBlockingStub(inferenceChannel);
-      authStub = AuthenticationServiceGrpc.newBlockingStub(authChannel);
+      verifyStub = AuthenticationServiceGrpc.newBlockingStub(databaseChannel);
+      statStub = StatServiceGrpc.newBlockingStub(databaseChannel);
 
       server.post("/chat", (req, res) -> {
          Request clientRequest = mapper.readValue(jsonRequest(req.getRequest()), Request.class);
@@ -218,6 +223,44 @@ public class Gateway {
          } else {
             res.sendResponseHeader(404);
             res.sendResponse(Optional.empty());
+         }
+      });
+
+      server.post("/usage", (req, res) -> {
+         JsonNode node = mapper.readTree(req.getRequest());
+         String uuid = node.get("id").asText();
+
+         StatsResult result = statStub.getStats(inference.UUID.newBuilder().setUuid(uuid).build());
+
+         switch (result.getPayloadCase()) {
+            case STATUS -> {
+               int code = result.getStatus();
+               res.sendResponseHeader(code);
+               res.sendResponse(Optional.empty());
+            }
+
+            case SUCCESS -> {
+               StatsSuccess stats = result.getSuccess();
+               int promptTokens = stats.getPromptTokens();
+               int completionTokens = stats.getCompletionTokens();
+               int requests = stats.getRequests();
+               int compaction = stats.getCompaction();
+               int contextLength = stats.getContextLength();
+
+               String json = mapper
+                     .writeValueAsString(Map.of("prompt_tokens", promptTokens,
+                           "completion_tokens", completionTokens,
+                           "requests", requests,
+                           "compaction", compaction,
+                           "context_length", contextLength));
+
+               res.sendResponseHeader(200);
+               res.sendResponse(Optional.of(json.getBytes()));
+            }
+
+            default -> {
+               System.err.println("Payload not set");
+            }
          }
       });
 
@@ -247,7 +290,7 @@ public class Gateway {
          Auth clientAuth = mapper.readValue(jsonRequest(req.getRequest()), Auth.class);
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
-         Result result = authStub.login(credentials);
+         LoginResult result = verifyStub.login(credentials);
          handleResult(result, res);
       });
 
@@ -256,13 +299,13 @@ public class Gateway {
          Credentials credentials = Credentials.newBuilder().setUsername(clientAuth.username())
                .setPassword(clientAuth.password()).build();
 
-         Result result = authStub.sign(credentials);
+         LoginResult result = verifyStub.sign(credentials);
          handleResult(result, res);
       });
 
       server.start();
 
-      authChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+      databaseChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
       inferenceChannel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
    }
 }

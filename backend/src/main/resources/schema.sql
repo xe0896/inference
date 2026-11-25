@@ -1,8 +1,18 @@
 DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS statistics;
 
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY NOT NULL,
     username TEXT UNIQUE NOT NULL,
     salt TEXT NOT NULL,
     hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS statistics (
+    id UUID PRIMARY KEY,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    requests INTEGER NOT NULL DEFAULT 0,
+    compaction INTEGER NOT NULL DEFAULT 0,
+    context_length INTEGER NOT NULL DEFAULT 0
 );

@@ -575,6 +575,239 @@ button:focus-visible {
   text-decoration: underline;
 }
 
+/* Context ring in the composer */
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 999px;
+}
+
+.ring:hover {
+  background: var(--surface-h);
+}
+
+.ring svg {
+  transform: rotate(-90deg);
+}
+
+.ring circle {
+  fill: none;
+  stroke-width: 2;
+}
+
+.ring-track {
+  stroke: var(--surface-h);
+}
+
+.ring:hover .ring-track {
+  stroke: var(--border-strong, #3a3a3a);
+}
+
+.ring-fill {
+  stroke: var(--text);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.4s ease;
+}
+
+.ring.warn .ring-fill {
+  stroke: var(--danger);
+}
+
+/* Tooltip */
+.ring::after {
+  content: attr(data-tip);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-h);
+  background: var(--surface-h);
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.ring:hover::after,
+.ring:focus-visible::after {
+  opacity: 1;
+}
+
+/* Usage dialog (reuses .auth-backdrop) */
+
+.usage {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  padding: 6px 24px 24px;
+  background: var(--surface);
+  border: 1px solid var(--surface-h);
+  border-radius: 20px;
+}
+
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+  margin-right: -8px;
+  border-bottom: 1px solid var(--surface-h);
+}
+
+.usage h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: 999px;
+}
+
+.icon-btn:hover {
+  color: var(--text-h);
+  background: var(--surface-h);
+}
+
+.usage-section {
+  padding-top: 20px;
+}
+
+.usage h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+.hint {
+  display: block;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.hint.error {
+  color: var(--danger);
+}
+
+/* Conversation memory card */
+
+.memory {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg);
+  border-radius: 14px;
+}
+
+.memory-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-pct {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+.meter {
+  position: relative;
+  height: 6px;
+  background: var(--surface-h);
+  border-radius: 999px;
+}
+
+.meter i {
+  display: block;
+  height: 100%;
+  background: var(--text-h);
+  border-radius: inherit;
+  transition: width 0.4s ease;
+}
+
+.meter.warn i {
+  background: var(--danger);
+}
+
+/* Tick where summarising kicks in */
+.meter b {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+/* Settings-style rows */
+
+.rows {
+  margin: 0;
+}
+
+.row-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--surface-h);
+}
+
+.row-item:last-child {
+  border-bottom: none;
+}
+
+.row-item dt {
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.row-item dt .hint {
+  margin-top: 1px;
+}
+
+.row-item dd {
+  margin: 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-h);
+}
+
 @media (max-width: 600px) {
   .chat-header,
   .composer {

@@ -10,6 +10,7 @@ export default defineConfig({
             "/login": "http://100.115.30.63:8091",
             "/signup": "http://100.115.30.63:8091",
             "/tokens": "http://100.115.30.63:8091",
+            "/usage": "http://100.115.30.63:8091",
         },
     },
 });

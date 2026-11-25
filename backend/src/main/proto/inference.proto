@@ -13,8 +13,12 @@ service InferenceService {
 }
 
 service AuthenticationService {
-    rpc Sign(Credentials) returns (Result) {}
-    rpc Login(Credentials) returns (Result) {}
+    rpc Sign(Credentials) returns (LoginResult) {}
+    rpc Login(Credentials) returns (LoginResult) {}
+}
+
+service StatService {
+    rpc GetStats(UUID) returns (StatsResult) {}
 }
 
 message Conversation {
@@ -22,6 +26,18 @@ message Conversation {
     int32 max_tokens = 2;
     float temperature = 3;
     bool thinking = 4;
+}
+
+message UUID {
+    string uuid = 1;
+}
+
+message StatsSuccess {
+    int32 prompt_tokens = 1;
+    int32 completion_tokens = 2;
+    int32 requests = 3;
+    int32 compaction = 4;
+    int32 context_length = 5;
 }
 
 message TokenCountResponse {
@@ -44,7 +60,7 @@ message Messages {
 }
 
 message LoginSuccess {
-    string uuid = 1;
+    UUID uuid = 1;
     Messages history = 2;
 }
 
@@ -60,7 +76,14 @@ message Chunk {
     string text = 2;
 }
 
-message Result {
+message StatsResult {
+    oneof payload {
+        int32 status = 1;
+        StatsSuccess success = 2;
+    }
+}
+
+message LoginResult {
     oneof payload {
         int32 status = 1;
         LoginSuccess success = 2;

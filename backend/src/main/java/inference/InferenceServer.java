@@ -151,7 +151,7 @@ public class InferenceServer {
          int currentToken = tokensConversation(messages);
          System.out.println("Current token count: " + currentToken);
 
-         if (currentToken > CONTEXT_LIMIT * 0.1) {
+         if (currentToken > CONTEXT_LIMIT * 0.6) {
             responseObserver
                   .onNext(Response.newBuilder().setChunk(Chunk.newBuilder().setKind(Kind.COMPACT).setText("")).build());
             List<inference.Message> m = messages.getMessageList();
