@@ -19,6 +19,10 @@ service AuthenticationService {
 
 service StatService {
     rpc GetStats(UUID) returns (StatsResult) {}
+    rpc UpdateTokens(Statistic) returns (Status) {}
+    rpc UpdateMessageRequests(UUID) returns (Status) {}
+    rpc UpdateCompactions(UUID) returns (Status) {}
+    rpc UpdateContextLength(Statistic) returns (Status) {}
 }
 
 message Conversation {
@@ -26,10 +30,36 @@ message Conversation {
     int32 max_tokens = 2;
     float temperature = 3;
     bool thinking = 4;
+    UUID id = 5;
+}
+
+message Tokens {
+    int32 prompt_tokens = 1;
+    int32 completion_tokens = 2;
 }
 
 message UUID {
     string uuid = 1;
+}
+
+message Statistic {
+    UUID id = 1;
+    oneof payload {
+        Tokens tokens = 2;
+        MessageRequests requests = 3;
+        Compactions compactions = 4;
+        ContextLength context_length = 5;
+    }
+}
+
+message MessageRequests {
+    int32 requests = 1;
+}
+message Compactions {
+    int32 compaction = 1;
+}
+message ContextLength {
+    int32 context_length = 1;
 }
 
 message StatsSuccess {
@@ -38,6 +68,10 @@ message StatsSuccess {
     int32 requests = 3;
     int32 compaction = 4;
     int32 context_length = 5;
+}
+
+message Status {
+    int32 status = 1;
 }
 
 message TokenCountResponse {

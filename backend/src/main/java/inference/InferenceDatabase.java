@@ -98,6 +98,103 @@ public class InferenceDatabase {
    static class StatImpl extends StatServiceGrpc.StatServiceImplBase {
       static String statQuery = "SELECT * FROM statistics WHERE id = ?";
 
+      static String updateTokens = """
+            UPDATE statistics
+            SET prompt_tokens = prompt_tokens + ?,
+                completion_tokens = completion_tokens + ?
+            WHERE id = ?
+            """;
+
+      static String updateRequests = """
+               UPDATE statistics
+               SET requests = requests + ?
+               WHERE id = ?
+            """;
+
+      static String updateCompactions = """
+               UPDATE statistics
+               SET compaction = compaction + ?
+               WHERE id = ?
+            """;
+
+      static String updateCtxLength = """
+               UPDATE statistics
+               SET context_length = context_length + ?
+               WHERE id = ?
+            """;
+
+      @Override
+      public void updateTokens(Statistic statistic, StreamObserver<Status> responseObserver) {
+         Tokens token = statistic.getTokens();
+         UUID id = UUID.fromString(statistic.getId().getUuid());
+         int completionTokens = token.getCompletionTokens();
+         int promptTokens = token.getPromptTokens();
+
+         try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
+            PreparedStatement updateTokensPs = conn.prepareStatement(updateTokens);
+            updateTokensPs.setInt(1, promptTokens);
+            updateTokensPs.setInt(2, completionTokens);
+            updateTokensPs.setObject(3, id);
+            updateTokensPs.executeUpdate();
+            responseObserver.onNext(Status.newBuilder().setStatus(200).build());
+            responseObserver.onCompleted();
+         } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+            throw new RuntimeException();
+         }
+      }
+
+      @Override
+      public void updateMessageRequests(inference.UUID id, StreamObserver<Status> responseObserver) {
+         UUID uuid = UUID.fromString(id.getUuid());
+         try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
+            PreparedStatement updateRequestsPs = conn.prepareStatement(updateRequests);
+            updateRequestsPs.setInt(1, 1);
+            updateRequestsPs.setObject(2, uuid);
+            updateRequestsPs.executeUpdate();
+            responseObserver.onNext(Status.newBuilder().setStatus(200).build());
+            responseObserver.onCompleted();
+         } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+            throw new RuntimeException();
+         }
+
+      }
+
+      @Override
+      public void updateCompactions(inference.UUID id, StreamObserver<Status> responseObserver) {
+         UUID uuid = UUID.fromString(id.getUuid());
+
+         try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
+            PreparedStatement updateCompactionsPs = conn.prepareStatement(updateCompactions);
+            updateCompactionsPs.setInt(1, 1);
+            updateCompactionsPs.setObject(2, uuid);
+            updateCompactionsPs.executeUpdate();
+            responseObserver.onNext(Status.newBuilder().setStatus(200).build());
+            responseObserver.onCompleted();
+         } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+            throw new RuntimeException();
+         }
+      }
+
+      @Override
+      public void updateContextLength(Statistic statistic, StreamObserver<Status> responseObserver) {
+         ContextLength contextLength = statistic.getContextLength();
+         UUID id = UUID.fromString(statistic.getId().getUuid());
+         int intCtxLength = contextLength.getContextLength();
+
+         try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {
+            PreparedStatement updateCtxLengthPs = conn.prepareStatement(updateCtxLength);
+            updateCtxLengthPs.setInt(1, intCtxLength);
+            updateCtxLengthPs.setObject(2, id);
+            updateCtxLengthPs.executeUpdate();
+         } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+            throw new RuntimeException();
+         }
+      }
+
       @Override
       public void getStats(inference.UUID uuid, StreamObserver<StatsResult> responseObserver) {
          try (Connection conn = DriverManager.getConnection(url, "postgres", DB_PASSWORD)) {

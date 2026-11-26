@@ -43,7 +43,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.grpc.Context;
 import io.grpc.Grpc;
+import io.grpc.InsecureChannelCredentials;
 import io.grpc.InsecureServerCredentials;
+import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.stub.StreamObserver;
 
@@ -51,6 +53,8 @@ import io.grpc.stub.StreamObserver;
  * Server that manages startup/shutdown of a {@code Greeter} server.
  */
 public class InferenceServer {
+   private static StatServiceGrpc.StatServiceBlockingStub statStub;
+
    static class InferenceImpl extends InferenceServiceGrpc.InferenceServiceImplBase {
       private static final String MODEL_ID = "ggml-org/gemma-4-E2B-it-GGUF:Q80";
 
@@ -142,7 +146,8 @@ public class InferenceServer {
          return Response.newBuilder().build();
       }
 
-      public ChatRequest summaryCheck(Conversation conv, StreamObserver<Response> responseObserver) {
+      public ChatRequest summaryCheck(inference.UUID uuid, Conversation conv,
+            StreamObserver<Response> responseObserver) {
          float temperature = conv.getTemperature();
          boolean thinking = conv.getThinking();
          int maxTokens = conv.getMaxTokens();
@@ -161,6 +166,8 @@ public class InferenceServer {
                         .setChunk(Chunk.newBuilder().setKind(Kind.FINISHED_COMPACT).setText(summary))
                         .build());
 
+            statStub.updateCompactions(uuid);
+
             return new ChatRequest(MODEL_ID,
                   List.of(new Message("assistant", summary), new Message("user", m.getLast().getContent())), true,
                   maxTokens, temperature,
@@ -174,8 +181,11 @@ public class InferenceServer {
       @Override
       public void generate(Conversation conv, StreamObserver<Response> responseObserver) {
          try (HttpClient client = HttpClient.newHttpClient()) {
+            inference.UUID uuid = inference.UUID.newBuilder().setUuid(conv.getId().getUuid()).build();
+            statStub.updateMessageRequests(uuid);
+
             // Request in record form which would turn into JSON
-            ChatRequest chatRequest = summaryCheck(conv, responseObserver);
+            ChatRequest chatRequest = summaryCheck(uuid, conv, responseObserver);
 
             // An event stream as we want SSE between our server and the llama-server
             HttpRequest request = post(URL, chatRequest, "text/event-stream", "/v1/chat/completions", "secret");
@@ -402,6 +412,12 @@ public class InferenceServer {
     */
    public static void main(String[] args) throws IOException, InterruptedException {
       final InferenceServer server = new InferenceServer();
+      String databaseTarget = "localhost:8081";
+      ManagedChannel databaseChannel = Grpc.newChannelBuilder(databaseTarget, InsecureChannelCredentials.create())
+            .build();
+
+      statStub = StatServiceGrpc.newBlockingStub(databaseChannel);
+
       server.start();
       server.blockUntilShutdown();
    }
